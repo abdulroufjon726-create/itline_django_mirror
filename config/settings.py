@@ -1,8 +1,12 @@
 from pathlib import Path
 import os
 import dj_database_url
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Lokal ishlab chiqishda BASE_DIR/.env dan o'qiladi (Render'da env dashboard'dan keladi)
+load_dotenv(BASE_DIR / ".env")
 
 
 # SECURITY
@@ -160,6 +164,11 @@ CORS_ALLOW_HEADERS = (*default_headers, "x-user-phone")
 # TELEGRAM BOT (o'quvchilarga xabar yuborish)
 # Tavsiya: tokenni Render'da TG_BOT_TOKEN env o'zgaruvchisiga ko'chiring
 # ─────────────────────────────
-TG_BOT_TOKEN = os.environ.get(
-    "TG_BOT_TOKEN", "8741000264:AAHFZ8IXiH3JmhfE-TBE7-OJbDcODvi7wDA"
-)
+TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
+
+# ─────────────────────────────
+# ADMIN / MENEJER PANEL PAROLLARI
+# Kodda saqlanmaydi — lokalda .env, deployda Render env orqali beriladi
+# ─────────────────────────────
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+EXCELLENCE_PASSWORD = os.environ.get("EXCELLENCE_PASSWORD", "")

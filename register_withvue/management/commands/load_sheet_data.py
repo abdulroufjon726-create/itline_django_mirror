@@ -17,6 +17,7 @@ import json
 import re
 from pathlib import Path
 
+from django.conf import settings
 from django.contrib.auth.hashers import make_password
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
@@ -45,8 +46,8 @@ def fmt_phone(raw):
 DATA_FILE = Path(__file__).resolve().parents[2] / "data" / "sheet_data.json"
 SOURCE = "sheet"
 
-# Barcha o'qituvchilar uchun boshlang'ich parol
-DEFAULT_TEACHER_PASSWORD = "excel2024"
+# Barcha o'qituvchilar uchun boshlang'ich parol (env orqali — views.ADMIN_PASSWORD bilan bir xil)
+DEFAULT_TEACHER_PASSWORD = settings.ADMIN_PASSWORD
 
 # Varaq nomidan o'qituvchi: (haqiqiy ism, telefon)
 # Varaq nomi qo'shma bo'lsa (masalan "HusAbdulloh" = Husniddin + Abdulloh),
@@ -79,9 +80,9 @@ EXTRA_TEACHERS = [
 ]
 
 # Menejerlar (direktor) — o'chirilmaydi, faqat yo'q bo'lsa yaratiladi.
-# Parol ustozlarnikidan (excel2024) farq qiladi: menejer eng yuqori
+# Parol ustozlarnikidan farq qiladi: menejer eng yuqori
 # daraja, uning paroli views.EXCELLENCE_PASSWORD bilan bir xil
-DEFAULT_MANAGER_PASSWORD = "excellence2024"
+DEFAULT_MANAGER_PASSWORD = settings.EXCELLENCE_PASSWORD
 DEFAULT_MANAGERS = [
     # Markazning asosiy raqami — jadvalda ko'plab o'quvchilarning
     # ota-ona ustunida uchraydi, lekin akkaunt sifatida ro'yxatda yo'q edi
@@ -455,7 +456,7 @@ class Command(BaseCommand):
                 return cand
 
     def _create_teacher(self, name, phone=""):
-        """O'qituvchi yaratadi — parol har doim excel2024.
+        """O'qituvchi yaratadi — parol DEFAULT_TEACHER_PASSWORD (env orqali).
 
         Loyihada "admin" deganda Teacher yozuvi bilan bog'langan
         Student(is_admin=True) tushuniladi (register_student shunday

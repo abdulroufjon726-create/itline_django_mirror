@@ -35,11 +35,13 @@ from .models import (
 )
 
 from django.utils import timezone
+from django.conf import settings
 from rest_framework import generics, permissions
 from .serializers import NewsSerializer
 
-ADMIN_PASSWORD = "excel2024"
-EXCELLENCE_PASSWORD = "excellence2024"
+# Parollar kodda saqlanmaydi — settings orqali env'dan keladi (.env / Render)
+ADMIN_PASSWORD = settings.ADMIN_PASSWORD
+EXCELLENCE_PASSWORD = settings.EXCELLENCE_PASSWORD
 
 ODD_DAYS = {0, 2, 4}
 EVEN_DAYS = {1, 3, 5}

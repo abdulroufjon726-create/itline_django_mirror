@@ -92,6 +92,13 @@ class Student(models.Model):
 
     coin_balance = models.IntegerField(default=0, verbose_name="Coin balansi")
 
+    # Doimiy oylik chegirma — har oy to'lov yaratilganda o'sha oyning
+    # chegirmasiga (Payment.discount) avtomatik nusxalanadi. Menejer bir
+    # marta o'rnatadi, keyin har oyga o'zi qo'llanadi.
+    monthly_discount = models.IntegerField(
+        default=0, verbose_name="Doimiy oylik chegirma"
+    )
+
     note = models.TextField(blank=True, verbose_name="Izoh")
     source = models.CharField(max_length=30, blank=True, default="")
 
@@ -227,6 +234,10 @@ class Payment(models.Model):
     month = models.CharField(max_length=7)
     stage = models.IntegerField()
     amount_due = models.IntegerField()
+    # Shu oyga berilgan chegirma. To'lanishi kerak bo'lgan sof summa =
+    # amount_due - discount. Doimiy oylik chegirma (Student.monthly_discount)
+    # to'lov yaratilganda shu yerga nusxalanadi, menejer o'zgartira oladi.
+    discount = models.IntegerField(default=0, verbose_name="Chegirma")
     is_paid = models.BooleanField(default=False)
     paid_at = models.DateTimeField(null=True, blank=True)
     paid_amount = models.IntegerField(default=0)

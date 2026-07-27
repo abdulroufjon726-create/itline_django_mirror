@@ -72,6 +72,7 @@ urlpatterns = [
     # PAYMENTS
     # ───────────────────────────────
     path("payments/<int:student_id>/", views.get_payments),
+    path("students/<int:student_id>/wallet/", views.get_student_wallet),
     path("payments/", views.get_all_payments),
     path("payments/generate/", views.generate_payments),
     path("payments/confirm/<int:payment_id>/", views.confirm_payment),

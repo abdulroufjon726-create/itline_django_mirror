@@ -266,6 +266,64 @@ def attendance_map_for_month(student_ids, month_str):
     return result
 
 
+# ─────────────────────────────────────────
+# WALLET (virtual karta: ortiqcha balans + qarzdorlik)
+# ─────────────────────────────────────────
+
+
+def _wallet_from_totals(total_due, total_discount, total_paid):
+    """Jami summalardan kartani hisoblaydi.
+
+    Sof to'lanishi kerak = jami due − jami chegirma. Balans = to'langan −
+    sof to'lanishi kerak. Musbat bo'lsa kartada ortiqcha pul qoladi,
+    manfiy bo'lsa o'sha miqdor qarzdorlik.
+    """
+    net_due = int(total_due or 0) - int(total_discount or 0)
+    paid = int(total_paid or 0)
+    net = paid - net_due
+    return {
+        "balance": max(0, net),  # kartada qolgan (ortiqcha) pul
+        "debt": max(0, -net),  # qarzdorlik
+        "net": net,  # musbat=balans, manfiy=qarz
+        "total_due": net_due,  # chegirmadan keyingi jami to'lov
+        "total_paid": paid,
+    }
+
+
+def compute_wallet(student):
+    """Bitta o'quvchining barcha oylari bo'yicha kartasini qaytaradi."""
+    agg = student.payments.aggregate(
+        due=Sum("amount_due"),
+        disc=Sum("discount"),
+        paid=Sum("paid_amount"),
+    )
+    w = _wallet_from_totals(agg["due"], agg["disc"], agg["paid"])
+    w["monthly_discount"] = student.monthly_discount
+    return w
+
+
+def wallets_for(student_ids):
+    """Bir nechta o'quvchi uchun kartani bitta so'rovда hisoblaydi.
+
+    {student_id: {"balance", "debt", "net", ...}} ko'rinishida qaytaradi.
+    """
+    out = {}
+    if not student_ids:
+        return out
+    rows = (
+        Payment.objects.filter(student_id__in=student_ids)
+        .values("student_id")
+        .annotate(
+            due=Sum("amount_due"),
+            disc=Sum("discount"),
+            paid=Sum("paid_amount"),
+        )
+    )
+    for r in rows:
+        out[r["student_id"]] = _wallet_from_totals(r["due"], r["disc"], r["paid"])
+    return out
+
+
 def attendance_based_due(amount_due, attended, total):
     """Davomatга qarab to'lov = amount_due * kelgan / jami. Jami 0 → None."""
     if not total:
@@ -1161,6 +1219,7 @@ def get_students_overview(request):
 
             rows = [s for s in rows if hit(s)]
 
+        wallet_map = wallets_for([s.id for s in rows])
         data = [
             {
                 "id": s.id,
@@ -1176,6 +1235,9 @@ def get_students_overview(request):
                 "schedule": s.schedule,
                 "is_graduate": s.is_graduate,
                 "coin_balance": s.coin_balance,
+                "monthly_discount": s.monthly_discount,
+                "wallet_balance": wallet_map.get(s.id, {}).get("balance", 0),
+                "wallet_debt": wallet_map.get(s.id, {}).get("debt", 0),
             }
             for s in rows
         ]
@@ -1328,6 +1390,8 @@ def get_students(request):
             except ValueError:
                 return JsonResponse({"error": "Invalid teacher_id"}, status=400)
 
+        rows = list(qs)
+        wallet_map = wallets_for([s.id for s in rows])
         data = [
             {
                 "id": s.id,
@@ -1340,8 +1404,11 @@ def get_students(request):
                 "stage": s.stage,
                 "schedule": s.schedule,
                 "coin_balance": s.coin_balance,
+                "monthly_discount": s.monthly_discount,
+                "wallet_balance": wallet_map.get(s.id, {}).get("balance", 0),
+                "wallet_debt": wallet_map.get(s.id, {}).get("debt", 0),
             }
-            for s in qs
+            for s in rows
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
@@ -1379,7 +1446,28 @@ def update_student(request, student_id):
                 )
             student.schedule = data["schedule"]
 
+        # ✅ Doimiy oylik chegirma. O'zgartirilganda mavjud (hali to'lanmagan)
+        # oylarга ham qo'llanadi — to'langan oylar tegilmaydi.
+        monthly_discount_changed = False
+        if "monthly_discount" in data:
+            try:
+                student.monthly_discount = max(0, int(data["monthly_discount"]))
+                monthly_discount_changed = True
+            except (ValueError, TypeError):
+                return JsonResponse(
+                    {"error": "monthly_discount son bo'lishi kerak"}, status=400
+                )
+
         student.save()
+
+        if monthly_discount_changed:
+            for p in student.payments.filter(is_paid=False):
+                new_disc = max(0, min(student.monthly_discount, p.amount_due))
+                if p.discount != new_disc:
+                    p.discount = new_disc
+                    p.save(update_fields=["discount"])
+
+        wallet = compute_wallet(student)
         return JsonResponse(
             {
                 "message": "O'quvchi yangilandi!",
@@ -1387,6 +1475,9 @@ def update_student(request, student_id):
                 "schedule": student.schedule,
                 "teacher_id": student.teacher_id,
                 "teacher_name": student.teacher.name if student.teacher else "",
+                "monthly_discount": student.monthly_discount,
+                "wallet_balance": wallet.get("balance", 0),
+                "wallet_debt": wallet.get("debt", 0),
             }
         )
     except json.JSONDecodeError:
@@ -2321,6 +2412,7 @@ def get_payments(request, student_id):
                     "month": p.month,
                     "stage": p.stage,
                     "amount_due": p.amount_due,
+                    "discount": p.discount,
                     "paid_amount": p.paid_amount,
                     "is_paid": p.is_paid,
                     "paid_at": p.paid_at.strftime("%Y-%m-%d") if p.paid_at else None,
@@ -2331,6 +2423,21 @@ def get_payments(request, student_id):
                 }
             )
         return JsonResponse(data, safe=False)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+def get_student_wallet(request, student_id):
+    """O'quvchining virtual kartasi — ortiqcha balans va qarzdorlik."""
+    try:
+        try:
+            student_id = int(student_id)
+        except ValueError:
+            return JsonResponse({"error": "Invalid student_id"}, status=400)
+        student = Student.objects.filter(id=student_id).first()
+        if not student:
+            return JsonResponse({"error": "Student topilmadi"}, status=404)
+        return JsonResponse(compute_wallet(student))
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 
@@ -2360,12 +2467,15 @@ def get_all_payments(request):
             if month
             else {}
         )
+        # Har o'quvchining kartasi (barcha oylar bo'yicha) — bitta so'rovда
+        wallet_map = wallets_for({p.student_id for p in payments})
 
         data = []
         for p in payments:
             group = student_primary_group(p.student)
             due = payment_due_date(p.month, group)
             attended, total = att_map.get(p.student_id, (0, 0))
+            wallet = wallet_map.get(p.student_id, {})
             data.append(
                 {
                     "id": p.id,
@@ -2376,6 +2486,8 @@ def get_all_payments(request):
                     "month": p.month,
                     "stage": p.stage,
                     "amount_due": p.amount_due,
+                    "discount": p.discount,
+                    "monthly_discount": p.student.monthly_discount,
                     "paid_amount": p.paid_amount,
                     "is_paid": p.is_paid,
                     "paid_at": str(p.paid_at) if p.paid_at else None,
@@ -2384,6 +2496,9 @@ def get_all_payments(request):
                     "attended_count": attended,
                     "total_lessons": total,
                     "attendance_due": attendance_based_due(p.amount_due, attended, total),
+                    # Virtual karta (barcha oylar bo'yicha, o'quvchi darajasida)
+                    "wallet_balance": wallet.get("balance", 0),
+                    "wallet_debt": wallet.get("debt", 0),
                 }
             )
         return JsonResponse(data, safe=False)
@@ -2428,7 +2543,12 @@ def generate_payments(request):
             _, created = Payment.objects.get_or_create(
                 student=student,
                 month=month,
-                defaults={"stage": student.stage, "amount_due": price},
+                defaults={
+                    "stage": student.stage,
+                    "amount_due": price,
+                    # Doimiy oylik chegirma bo'lsa — shu oyga avtomatik qo'llanadi
+                    "discount": max(0, min(int(student.monthly_discount or 0), price)),
+                },
             )
             if created:
                 created_count += 1
@@ -2487,6 +2607,17 @@ def confirm_payment(request, payment_id):
                     {"error": "paid_amount son bo'lishi kerak"}, status=400
                 )
 
+        # ✅ Chegirma (shu oy uchun) — 0..amount_due oralig'iga cheklanadi
+        if "discount" in data:
+            try:
+                payment.discount = max(
+                    0, min(int(data["discount"]), int(payment.amount_due))
+                )
+            except (ValueError, TypeError):
+                return JsonResponse(
+                    {"error": "discount son bo'lishi kerak"}, status=400
+                )
+
         payment.is_paid = data.get("is_paid", payment.is_paid)
         payment.paid_at = timezone.now() if payment.is_paid else None
         payment.save()
@@ -2503,13 +2634,17 @@ def confirm_payment(request, payment_id):
         except Exception:
             logging.getLogger(__name__).exception("payment ontime coin xatosi")
 
+        wallet = compute_wallet(payment.student) if payment.student_id else {}
         return JsonResponse(
             {
                 "message": "To'lov yangilandi!",
                 "is_paid": payment.is_paid,
                 "amount_due": payment.amount_due,
+                "discount": payment.discount,
                 "paid_amount": payment.paid_amount,  # ✅ QO'SHILDI
                 "coin_awarded": coin_awarded,
+                "wallet_balance": wallet.get("balance", 0),
+                "wallet_debt": wallet.get("debt", 0),
             }
         )
     except json.JSONDecodeError:
@@ -2551,6 +2686,17 @@ def update_payment_amount(request, payment_id):
                     {"error": "paid_amount son bo'lishi kerak"}, status=400
                 )
 
+        # ✅ Chegirma (shu oy uchun)
+        if "discount" in data:
+            try:
+                payment.discount = max(
+                    0, min(int(data["discount"]), int(payment.amount_due))
+                )
+            except (ValueError, TypeError):
+                return JsonResponse(
+                    {"error": "discount son bo'lishi kerak"}, status=400
+                )
+
         is_paid_changed = "is_paid" in data
         if is_paid_changed:
             payment.is_paid = bool(data["is_paid"])
@@ -2571,13 +2717,17 @@ def update_payment_amount(request, payment_id):
             except Exception:
                 logging.getLogger(__name__).exception("payment ontime coin xatosi")
 
+        wallet = compute_wallet(payment.student) if payment.student_id else {}
         return JsonResponse(
             {
                 "message": "Summa yangilandi!",
                 "amount_due": payment.amount_due,
+                "discount": payment.discount,
                 "paid_amount": payment.paid_amount,  # ✅ QO'SHILDI
                 "is_paid": payment.is_paid,
                 "coin_awarded": coin_awarded,
+                "wallet_balance": wallet.get("balance", 0),
+                "wallet_debt": wallet.get("debt", 0),
             }
         )
     except json.JSONDecodeError:

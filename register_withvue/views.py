@@ -2098,6 +2098,153 @@ def update_attendance(request, attendance_id):
         return JsonResponse({"error": str(e)}, status=400)
 
 
+@csrf_exempt
+def attendance_group_day(request):
+    """Guruh + sana bo'yicha davomat ro'yxati (kerak bo'lsa avtomatik yaratadi).
+
+    GET ?group_id=<id>&date=YYYY-MM-DD (date bo'lmasa — bugun).
+    Dars (group, date) bo'yicha get_or_create qilinadi, har o'quvchiga
+    'absent' yozuvi ochiladi va ro'yxat qaytariladi. Qo'lda "dars yaratish"
+    kerak emas — ustoz/menejer shunchaki guruhni tanlab, belgilaydi.
+    """
+    try:
+        group_id = request.GET.get("group_id")
+        date_str = (request.GET.get("date") or "").strip()
+        if not group_id:
+            return JsonResponse({"error": "group_id kiritilmadi"}, status=400)
+        group = Group.objects.select_related("teacher").filter(id=group_id).first()
+        if not group:
+            return JsonResponse({"error": "Guruh topilmadi"}, status=404)
+
+        if date_str:
+            try:
+                d = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                return JsonResponse(
+                    {"error": "date format YYYY-MM-DD bo'lishi kerak"}, status=400
+                )
+        else:
+            d = tashkent_today()
+
+        lesson, _ = Lesson.objects.get_or_create(
+            group=group,
+            date=d,
+            defaults={"title": group.name, "teacher": group.teacher},
+        )
+
+        students = list(
+            group.students.filter(is_admin=False, is_excellence=False).order_by(
+                "name", "surname"
+            )
+        )
+        existing = {a.student_id: a for a in Attendance.objects.filter(lesson=lesson)}
+        to_create = [
+            Attendance(student=s, lesson=lesson, status="absent")
+            for s in students
+            if s.id not in existing
+        ]
+        if to_create:
+            Attendance.objects.bulk_create(to_create)
+            existing = {
+                a.student_id: a for a in Attendance.objects.filter(lesson=lesson)
+            }
+
+        rows = [
+            {
+                "attendance_id": existing[s.id].id,
+                "student_id": s.id,
+                "name": f"{s.name} {s.surname}",
+                "status": existing[s.id].status,
+            }
+            for s in students
+            if s.id in existing
+        ]
+        return JsonResponse(
+            {
+                "lesson_id": lesson.id,
+                "group_id": group.id,
+                "date": str(d),
+                "students": rows,
+            }
+        )
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+def attendance_group_month(request):
+    """Guruh + oy bo'yicha har o'quvchining davomati (jadval uchun).
+
+    GET ?group_id=<id>&month=YYYY-MM
+    Har o'quvchi uchun shu oydagi dars sanalari bo'yicha status va
+    present/late/absent sonlari qaytariladi. 'dates' — guruhning shu oydagi
+    dars kunlari (jadval ustunlari).
+    """
+    try:
+        group_id = request.GET.get("group_id")
+        month = (request.GET.get("month") or "").strip()
+        if not group_id:
+            return JsonResponse({"error": "group_id kiritilmadi"}, status=400)
+        group = Group.objects.filter(id=group_id).first()
+        if not group:
+            return JsonResponse({"error": "Guruh topilmadi"}, status=404)
+        try:
+            year, mon = int(month[:4]), int(month[5:7])
+        except (ValueError, IndexError):
+            return JsonResponse(
+                {"error": "month format YYYY-MM bo'lishi kerak"}, status=400
+            )
+
+        students = list(
+            group.students.filter(is_admin=False, is_excellence=False).order_by(
+                "name", "surname"
+            )
+        )
+        lessons = list(
+            Lesson.objects.filter(
+                group=group, date__year=year, date__month=mon
+            ).order_by("date")
+        )
+        dates = [str(les.date) for les in lessons]
+        att = Attendance.objects.filter(
+            lesson__in=lessons, student__in=students
+        ).select_related("lesson")
+
+        by_student = {}
+        for a in att:
+            by_student.setdefault(a.student_id, {})[str(a.lesson.date)] = (
+                a.id,
+                a.status,
+            )
+
+        rows = []
+        for s in students:
+            recs = by_student.get(s.id, {})
+            statuses = [v[1] for v in recs.values()]
+            rows.append(
+                {
+                    "student_id": s.id,
+                    "name": f"{s.name} {s.surname}",
+                    "present": statuses.count("present"),
+                    "late": statuses.count("late"),
+                    "absent": statuses.count("absent"),
+                    "records": [
+                        {
+                            "date": dt,
+                            "attendance_id": recs[dt][0],
+                            "status": recs[dt][1],
+                        }
+                        for dt in dates
+                        if dt in recs
+                    ],
+                }
+            )
+        return JsonResponse(
+            {"group_id": group.id, "month": month, "dates": dates, "students": rows}
+        )
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
 def get_student_attendance(request, student_id):
     """O'quvchining davomati."""
     try:

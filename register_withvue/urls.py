@@ -59,6 +59,8 @@ urlpatterns = [
     # ───────────────────────────────
     # ATTENDANCE
     # ───────────────────────────────
+    path("attendance/group-day/", views.attendance_group_day),
+    path("attendance/group-month/", views.attendance_group_month),
     path("attendance/<int:lesson_id>/", views.get_attendance),
     path("attendance/update/<int:attendance_id>/", views.update_attendance),
     path("student-attendance/<int:student_id>/", views.get_student_attendance),

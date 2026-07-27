@@ -146,6 +146,16 @@ class Lesson(models.Model):
     teacher = models.ForeignKey(
         Teacher, on_delete=models.SET_NULL, null=True, related_name="lessons"
     )
+    # Guruh + sana bo'yicha darsni aniqlash uchun. Soddalashtirilgan davomat
+    # oqimida menejer/ustoz guruhni tanlaydi — dars shu guruh va sana uchun
+    # avtomatik yaratiladi/topiladi (qo'lda "dars yaratish" bo'lmaydi).
+    group = models.ForeignKey(
+        "Group",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="lessons",
+    )
     date = models.DateField()
 
     class Meta:

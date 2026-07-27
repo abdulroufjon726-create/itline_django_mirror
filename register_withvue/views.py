@@ -32,6 +32,8 @@ from .models import (
     Lead,
     AdChannel,
     LessonReminderLog,
+    PaymentSettings,
+    PaymentRequest,
 )
 
 from django.utils import timezone
@@ -2879,6 +2881,253 @@ def update_payment_amount(request, payment_id):
         )
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+# ─────────────────────────────
+# TO'LOV KARTASI + TO'LOV SO'ROVLARI (chek)
+# ─────────────────────────────
+
+
+def get_payment_settings(request):
+    """To'lov qabul qilinadigan karta ma'lumoti (student ko'radi)."""
+    s = PaymentSettings.get_settings()
+    return JsonResponse(
+        {
+            "card_number": s.card_number,
+            "card_holder": s.card_holder,
+            "note": s.note,
+        }
+    )
+
+
+@csrf_exempt
+def update_payment_settings(request):
+    """Kartani sozlash (manager)."""
+    if request.method != "PATCH":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    try:
+        data = json.loads(request.body)
+        s = PaymentSettings.get_settings()
+        if "card_number" in data:
+            s.card_number = str(data["card_number"]).strip()[:32]
+        if "card_holder" in data:
+            s.card_holder = str(data["card_holder"]).strip()[:100]
+        if "note" in data:
+            s.note = str(data["note"]).strip()[:255]
+        s.save()
+        return JsonResponse(
+            {
+                "message": "Karta saqlandi",
+                "card_number": s.card_number,
+                "card_holder": s.card_holder,
+                "note": s.note,
+            }
+        )
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+@csrf_exempt
+def create_payment_request(request):
+    """Student to'lov so'rovi (chek rasmi) yuboradi."""
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    try:
+        data = json.loads(request.body)
+        student_id = data.get("student_id")
+        receipt = (data.get("receipt_b64") or "").strip()
+        if not student_id:
+            return JsonResponse({"error": "student_id kiritilmadi"}, status=400)
+        if not receipt:
+            return JsonResponse({"error": "Chek rasmi yuklanmadi"}, status=400)
+        # Haddan tashqari katta rasmni rad etamiz (~700KB base64)
+        if len(receipt) > 720_000:
+            return JsonResponse(
+                {"error": "Rasm juda katta — kichikroq surat yuklang"}, status=400
+            )
+        student = Student.objects.filter(id=student_id).first()
+        if not student:
+            return JsonResponse({"error": "Student topilmadi"}, status=404)
+
+        pr = PaymentRequest.objects.create(
+            student=student,
+            receipt_b64=receipt,
+            note=str(data.get("note") or "").strip()[:255],
+        )
+        return JsonResponse(
+            {"message": "To'lov so'rovi yuborildi", "id": pr.id, "status": pr.status},
+            status=201,
+        )
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+def _payment_request_row(pr, include_receipt=False):
+    row = {
+        "id": pr.id,
+        "student_id": pr.student_id,
+        "student_name": f"{pr.student.name} {pr.student.surname}",
+        "student_phone": pr.student.phone,
+        "status": pr.status,
+        "amount": pr.amount,
+        "month": pr.month,
+        "paid_at": str(pr.paid_at) if pr.paid_at else None,
+        "note": pr.note,
+        "created_at": pr.created_at.strftime("%Y-%m-%d %H:%M"),
+        "resolved_at": pr.resolved_at.strftime("%Y-%m-%d %H:%M")
+        if pr.resolved_at
+        else None,
+    }
+    if include_receipt:
+        row["receipt_b64"] = pr.receipt_b64
+    return row
+
+
+def get_payment_requests(request):
+    """Manager uchun to'lov so'rovlari. ?status=pending|accepted|rejected|all."""
+    try:
+        status = (request.GET.get("status") or "pending").strip()
+        qs = PaymentRequest.objects.select_related("student").all()
+        if status != "all":
+            qs = qs.filter(status=status)
+        rows = [
+            _payment_request_row(pr, include_receipt=(pr.status == "pending"))
+            for pr in qs[:200]
+        ]
+        return JsonResponse(rows, safe=False)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+def pending_requests_count(request):
+    """Kutayotgan to'lov so'rovlari soni (badge uchun)."""
+    return JsonResponse(
+        {"count": PaymentRequest.objects.filter(status="pending").count()}
+    )
+
+
+def get_student_payment_requests(request, student_id):
+    """Studentning o'z to'lov so'rovlari (holatini ko'rish uchun)."""
+    try:
+        qs = PaymentRequest.objects.select_related("student").filter(
+            student_id=student_id
+        )
+        return JsonResponse(
+            [_payment_request_row(pr) for pr in qs[:50]], safe=False
+        )
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+def accept_payment_request(request, req_id):
+    """Manager so'rovni qabul qiladi: miqdor + sana + oy kiritadi.
+
+    Tegishli Payment yangilanadi, chek rasmi o'chiriladi, tarixda faqat
+    manager kiritgan ma'lumot qoladi.
+    """
+    if request.method != "PATCH":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    try:
+        data = json.loads(request.body)
+        pr = PaymentRequest.objects.select_related("student").filter(id=req_id).first()
+        if not pr:
+            return JsonResponse({"error": "So'rov topilmadi"}, status=404)
+        if pr.status != "pending":
+            return JsonResponse({"error": "So'rov allaqachon ko'rib chiqilgan"}, status=400)
+
+        try:
+            amount = int(data.get("amount"))
+        except (ValueError, TypeError):
+            return JsonResponse({"error": "amount son bo'lishi kerak"}, status=400)
+        if amount <= 0:
+            return JsonResponse({"error": "amount 0 dan katta bo'lishi kerak"}, status=400)
+
+        month = (data.get("month") or "").strip()
+        if not month:
+            return JsonResponse({"error": "month (YYYY-MM) kiritilishi kerak"}, status=400)
+
+        paid_at = None
+        paid_at_str = (data.get("paid_at") or "").strip()
+        if paid_at_str:
+            try:
+                paid_at = datetime.strptime(paid_at_str, "%Y-%m-%d").date()
+            except ValueError:
+                return JsonResponse(
+                    {"error": "paid_at format YYYY-MM-DD bo'lishi kerak"}, status=400
+                )
+
+        student = pr.student
+        payment, _ = Payment.objects.get_or_create(
+            student=student,
+            month=month,
+            defaults={
+                "stage": student.stage,
+                "amount_due": get_stage_price(student.stage),
+                "discount": max(0, min(int(student.monthly_discount or 0), get_stage_price(student.stage))),
+            },
+        )
+        payment.paid_amount = (payment.paid_amount or 0) + amount
+        net_due = max(0, payment.amount_due - payment.discount)
+        if payment.paid_amount >= net_due and net_due > 0:
+            payment.is_paid = True
+            payment.paid_at = timezone.now()
+        payment.save()
+
+        try:
+            sync_payment_ontime_coin(payment)
+        except Exception:
+            logging.getLogger(__name__).exception("payment ontime coin xatosi")
+
+        pr.status = "accepted"
+        pr.amount = amount
+        pr.month = month
+        pr.paid_at = paid_at
+        pr.note = str(data.get("note") or pr.note).strip()[:255]
+        pr.receipt_b64 = ""  # chek rasmini o'chiramiz
+        pr.resolved_at = timezone.now()
+        pr.save()
+
+        wallet = compute_wallet(student)
+        return JsonResponse(
+            {
+                "message": "To'lov qabul qilindi",
+                "status": pr.status,
+                "amount": pr.amount,
+                "month": pr.month,
+                "paid_at": str(pr.paid_at) if pr.paid_at else None,
+                "wallet_balance": wallet.get("balance", 0),
+                "wallet_debt": wallet.get("debt", 0),
+            }
+        )
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+@csrf_exempt
+def reject_payment_request(request, req_id):
+    """Manager so'rovni rad etadi — chek rasmi o'chiriladi."""
+    if request.method != "PATCH":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    try:
+        data = json.loads(request.body or "{}")
+        pr = PaymentRequest.objects.filter(id=req_id).first()
+        if not pr:
+            return JsonResponse({"error": "So'rov topilmadi"}, status=404)
+        pr.status = "rejected"
+        pr.note = str(data.get("note") or pr.note).strip()[:255]
+        pr.receipt_b64 = ""
+        pr.resolved_at = timezone.now()
+        pr.save()
+        return JsonResponse({"message": "So'rov rad etildi", "status": pr.status})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
 

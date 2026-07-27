@@ -269,6 +269,69 @@ class Payment(models.Model):
 # ─────────────────────────────────────────
 
 
+class PaymentSettings(models.Model):
+    """O'quv markazning to'lov qabul qiladigan kartasi (singleton).
+
+    Student to'lov qilishda shu karta raqami va egasining ismini ko'radi.
+    """
+
+    card_number = models.CharField(max_length=32, blank=True, verbose_name="Karta raqami")
+    card_holder = models.CharField(max_length=100, blank=True, verbose_name="Karta egasi")
+    note = models.CharField(max_length=255, blank=True, verbose_name="Izoh")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "To'lov sozlamasi"
+        verbose_name_plural = "To'lov sozlamalari"
+
+    def __str__(self):
+        return self.card_number or "Karta kiritilmagan"
+
+    @classmethod
+    def get_settings(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
+class PaymentRequest(models.Model):
+    """Student yuborgan to'lov so'rovi (chek rasmi bilan).
+
+    Student chekni yuklaydi -> pending. Manager qabul qilganda chekdagi
+    miqdor va to'langan sanani kiritadi -> tegishli Payment yangilanadi,
+    chek rasmi (receipt_b64) o'chiriladi, faqat manager ma'lumoti qoladi.
+    """
+
+    STATUS_CHOICES = [
+        ("pending", "Kutilmoqda"),
+        ("accepted", "Qabul qilindi"),
+        ("rejected", "Rad etildi"),
+    ]
+
+    student = models.ForeignKey(
+        Student, on_delete=models.CASCADE, related_name="payment_requests"
+    )
+    # Siqilgan chek rasmi (data URL / base64). Qabul yoki rad etilgach tozalanadi.
+    receipt_b64 = models.TextField(blank=True, verbose_name="Chek rasmi (base64)")
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default="pending")
+
+    # Manager qabul qilganda kiritadigan ma'lumotlar (tarix uchun)
+    amount = models.IntegerField(default=0, verbose_name="Miqdor")
+    month = models.CharField(max_length=7, blank=True, verbose_name="Oy (YYYY-MM)")
+    paid_at = models.DateField(null=True, blank=True, verbose_name="To'langan sana")
+    note = models.CharField(max_length=255, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "To'lov so'rovi"
+        verbose_name_plural = "To'lov so'rovlari"
+
+    def __str__(self):
+        return f"{self.student} — {self.status}"
+
+
 class Course(models.Model):
     name = models.CharField(max_length=100)
     # ✅ FIX: IntegerField faqat bitta ta'rif

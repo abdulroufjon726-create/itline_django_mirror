@@ -79,6 +79,15 @@ urlpatterns = [
     path("payments/generate/", views.generate_payments),
     path("payments/confirm/<int:payment_id>/", views.confirm_payment),
     path("payments/update/<int:payment_id>/", views.update_payment_amount),
+    # To'lov kartasi + chek so'rovlari
+    path("payment-settings/", views.get_payment_settings),
+    path("payment-settings/update/", views.update_payment_settings),
+    path("payment-requests/create/", views.create_payment_request),
+    path("payment-requests/", views.get_payment_requests),
+    path("payment-requests/pending-count/", views.pending_requests_count),
+    path("payment-requests/student/<int:student_id>/", views.get_student_payment_requests),
+    path("payment-requests/<int:req_id>/accept/", views.accept_payment_request),
+    path("payment-requests/<int:req_id>/reject/", views.reject_payment_request),
     # ───────────────────────────────
     # STUDENT PENALTIES
     # ───────────────────────────────

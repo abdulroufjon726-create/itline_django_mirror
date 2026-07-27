@@ -3075,7 +3075,8 @@ def accept_payment_request(request, req_id):
         )
         payment.paid_amount = (payment.paid_amount or 0) + amount
         net_due = max(0, payment.amount_due - payment.discount)
-        if payment.paid_amount >= net_due and net_due > 0:
+        # To'liq qoplansa (yoki narx belgilanmagan bo'lsa) — to'langan deb belgilaymiz
+        if payment.paid_amount >= net_due:
             payment.is_paid = True
             payment.paid_at = timezone.now()
         payment.save()

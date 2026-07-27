@@ -292,37 +292,67 @@ def _wallet_from_totals(total_due, total_discount, total_paid):
     }
 
 
+def effective_monthly_fee(student):
+    """O'quvchining haqiqiy oylik to'lovi.
+
+    Ustunlik: guruh kursining narxi (Course.monthly_fee) -> stage narxi.
+    To'lov yozuvida amount_due 0/belgilanmagan bo'lsa shu qiymat ishlatiladi —
+    shunda karta (wallet) va ko'rsatilgan "Oylik to'lov" bir xil bo'ladi.
+    """
+    group = student_primary_group(student)
+    if group and group.course_id:
+        fee = getattr(group.course, "monthly_fee", 0) or 0
+        if fee:
+            return int(fee)
+    return int(get_stage_price(student.stage) or 0)
+
+
+def _payment_due(amount_due, fallback_fee):
+    """To'lov yozuvining sof due'si — amount_due 0 bo'lsa kurs narxiga tayanadi."""
+    a = int(amount_due or 0)
+    return a if a > 0 else int(fallback_fee or 0)
+
+
 def compute_wallet(student):
     """Bitta o'quvchining barcha oylari bo'yicha kartasini qaytaradi."""
-    agg = student.payments.aggregate(
-        due=Sum("amount_due"),
-        disc=Sum("discount"),
-        paid=Sum("paid_amount"),
-    )
-    w = _wallet_from_totals(agg["due"], agg["disc"], agg["paid"])
+    fee = effective_monthly_fee(student)
+    total_due = total_disc = total_paid = 0
+    for p in student.payments.all():
+        total_due += _payment_due(p.amount_due, fee)
+        total_disc += int(p.discount or 0)
+        total_paid += int(p.paid_amount or 0)
+    w = _wallet_from_totals(total_due, total_disc, total_paid)
     w["monthly_discount"] = student.monthly_discount
     return w
 
 
 def wallets_for(student_ids):
-    """Bir nechta o'quvchi uchun kartani bitta so'rovда hisoblaydi.
+    """Bir nechta o'quvchi uchun kartani hisoblaydi.
 
     {student_id: {"balance", "debt", "net", ...}} ko'rinishida qaytaradi.
+    amount_due 0 bo'lsa har o'quvchining kurs narxiga tayanadi.
     """
     out = {}
-    if not student_ids:
+    ids = list(student_ids)
+    if not ids:
         return out
-    rows = (
-        Payment.objects.filter(student_id__in=student_ids)
-        .values("student_id")
-        .annotate(
-            due=Sum("amount_due"),
-            disc=Sum("discount"),
-            paid=Sum("paid_amount"),
-        )
-    )
-    for r in rows:
-        out[r["student_id"]] = _wallet_from_totals(r["due"], r["disc"], r["paid"])
+    # Har o'quvchining haqiqiy oylik narxi (guruh->kurs prefetch bilan)
+    fee_map = {}
+    for s in Student.objects.filter(id__in=ids).prefetch_related("groups__course"):
+        fee_map[s.id] = effective_monthly_fee(s)
+
+    agg = {}
+    for r in Payment.objects.filter(student_id__in=ids).values(
+        "student_id", "amount_due", "discount", "paid_amount"
+    ):
+        sid = r["student_id"]
+        a = agg.setdefault(sid, {"due": 0, "disc": 0, "paid": 0})
+        a["due"] += _payment_due(r["amount_due"], fee_map.get(sid, 0))
+        a["disc"] += int(r["discount"] or 0)
+        a["paid"] += int(r["paid_amount"] or 0)
+
+    for sid, a in agg.items():
+        out[sid] = _wallet_from_totals(a["due"], a["disc"], a["paid"])
     return out
 
 
@@ -2688,7 +2718,7 @@ def generate_payments(request):
                 not_opened_count += 1
                 continue
 
-            price = get_stage_price(student.stage)
+            price = effective_monthly_fee(student)
             _, created = Payment.objects.get_or_create(
                 student=student,
                 month=month,
@@ -3064,15 +3094,19 @@ def accept_payment_request(request, req_id):
                 )
 
         student = pr.student
+        fee = effective_monthly_fee(student)
         payment, _ = Payment.objects.get_or_create(
             student=student,
             month=month,
             defaults={
                 "stage": student.stage,
-                "amount_due": get_stage_price(student.stage),
-                "discount": max(0, min(int(student.monthly_discount or 0), get_stage_price(student.stage))),
+                "amount_due": fee,
+                "discount": max(0, min(int(student.monthly_discount or 0), fee)),
             },
         )
+        # Eski yozuvda narx belgilanmagan bo'lsa — kurs narxiga to'g'rilaymiz
+        if (payment.amount_due or 0) <= 0 and fee > 0:
+            payment.amount_due = fee
         payment.paid_amount = (payment.paid_amount or 0) + amount
         net_due = max(0, payment.amount_due - payment.discount)
         # To'liq qoplansa (yoki narx belgilanmagan bo'lsa) — to'langan deb belgilaymiz

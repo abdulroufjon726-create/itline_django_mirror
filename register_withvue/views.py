@@ -5870,6 +5870,22 @@ def update_profile(request):
 
         students = _find_students_by_any_phone(phone)
         teacher = _find_teacher_by_any_phone(phone)
+
+        # Menejer faqat Manager jadvalida — Student/Teacher qidiruvi uni
+        # topmaydi va u profilini umuman tahrirlay olmasdi
+        manager = _find_manager_by_any_phone(phone)
+        if manager and not students and not teacher:
+            manager.name = name[:100]
+            manager.surname = surname[:100]
+            manager.save(update_fields=["name", "surname"])
+            return JsonResponse(
+                {
+                    "message": "Profil yangilandi",
+                    "name": manager.name,
+                    "surname": manager.surname,
+                }
+            )
+
         if not students and not teacher:
             return JsonResponse({"error": "Foydalanuvchi topilmadi"}, status=404)
 

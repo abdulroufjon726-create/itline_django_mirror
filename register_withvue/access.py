@@ -251,6 +251,7 @@ ACTIONS = {
     "salary.pay": "Ustoz oyligi to'landi",
     "salary.unpay": "Oylik to'lovi bekor qilindi",
     "salary.advance": "Ustozga avans berildi",
+    "salary.settings": "Oylik sozlamasi o'zgartirildi",
     "device.block": "Qurilma bloklandi",
 }
 

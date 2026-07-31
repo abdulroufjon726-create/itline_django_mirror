@@ -39,6 +39,7 @@ urlpatterns = [
     path("super/devices/", super_views.get_devices),
     path("super/devices/<int:device_pk>/block/", super_views.set_device_blocked),
     path("super/salaries/", super_views.get_salaries),
+    path("super/salaries/bulk/", super_views.bulk_salary_settings),
     path("super/salaries/<int:teacher_id>/rate/", super_views.update_salary_rate),
     path("super/salaries/<int:teacher_id>/amount/", super_views.set_salary_amount),
     path("super/salaries/<int:teacher_id>/pay/", super_views.pay_salary),

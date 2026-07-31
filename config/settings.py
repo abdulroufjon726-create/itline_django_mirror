@@ -153,12 +153,15 @@ CORS_ALLOWED_ORIGINS = [
 # test uchun
 CORS_ALLOW_ALL_ORIGINS = True
 
-# Menejer paneli destruktiv amallarda 'X-User-Phone' sarlavhasini
-# yuboradi. Standart bo'lmagan sarlavha CORS preflight'ni ishga
-# tushiradi — ro'yxatga qo'shilmasa brauzer so'rovni bloklaydi.
+# Menejer paneli destruktiv amallarda 'X-User-Phone' sarlavhasini,
+# har bir so'rovda esa 'X-Device-Id' ni yuboradi (supermenejer qaysi
+# qurilmadan kirilganini shu orqali ko'radi). Standart bo'lmagan
+# sarlavha CORS preflight'ni ishga tushiradi — ro'yxatga qo'shilmasa
+# brauzer so'rovni bloklaydi va sahifada "Internet aloqasi yo'q"
+# ko'rinadi. Yangi sarlavha qo'shsangiz, shu ro'yxatga ham qo'shing.
 from corsheaders.defaults import default_headers  # noqa: E402
 
-CORS_ALLOW_HEADERS = (*default_headers, "x-user-phone")
+CORS_ALLOW_HEADERS = (*default_headers, "x-user-phone", "x-device-id")
 
 # ─────────────────────────────
 # TELEGRAM BOT (o'quvchilarga xabar yuborish)

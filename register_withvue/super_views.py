@@ -543,9 +543,32 @@ def _students_count_map():
     )
 
 
-def _salary_row(teacher, salary, students_count, advances):
+def _collected_map(month):
+    """Har ustozning o'quvchilaridan shu oy yig'ilgan pul.
+
+    Foizli oylik shu summadan hisoblanadi — ya'ni ustoz o'zi olib
+    kelgan tushumdan ulush oladi.
+    """
+    from .models import Payment
+
+    rows = (
+        Payment.objects.filter(month=month, student__teacher__isnull=False)
+        .values_list("student__teacher_id")
+        .annotate(total=db_models.Sum("paid_amount"))
+    )
+    return {tid: (total or 0) for tid, total in rows}
+
+
+def _salary_row(teacher, salary, students_count, advances, collected=0):
     """Bitta ustozning shu oydagi oylik holati."""
-    default_amount = (teacher.salary_per_student or 0) * students_count
+    mode = teacher.salary_mode or "per_student"
+    percent = float(teacher.salary_percent or 0)
+
+    if mode == "percent":
+        default_amount = int(round(collected * percent / 100))
+    else:
+        default_amount = (teacher.salary_per_student or 0) * students_count
+
     manual = salary.manual_amount if salary else None
     amount = default_amount if manual is None else manual
 
@@ -557,9 +580,17 @@ def _salary_row(teacher, salary, students_count, advances):
     return {
         "teacher_id": teacher.id,
         "teacher_name": teacher.name,
+        "salary_mode": mode,
         "salary_per_student": teacher.salary_per_student or 0,
+        "salary_percent": percent,
+        "collected": collected,
         "students_count": students_count,
         "default_amount": default_amount,
+        # Stavka ham, foiz ham qo'yilmagan bo'lsa oylik 0 bo'lib
+        # ko'rinadi — panel buni "sozlanmagan" deb ko'rsatadi
+        "is_configured": bool(
+            teacher.salary_per_student if mode == "per_student" else percent
+        ),
         "manual_amount": manual,
         "amount": amount,
         "advance_total": advance_total,
@@ -596,12 +627,15 @@ def get_salaries(request):
     for a in TeacherAdvance.objects.filter(month=month):
         advances.setdefault(a.teacher_id, []).append(a)
 
+    collected = _collected_map(month)
+
     rows = [
         _salary_row(
             t,
             salaries.get(t.id),
             counts.get(t.id, 0),
             advances.get(t.id, []),
+            collected.get(t.id, 0),
         )
         for t in Teacher.objects.order_by("name")
     ]
@@ -620,9 +654,38 @@ def get_salaries(request):
     )
 
 
+def _apply_salary_settings(teacher, data):
+    """Oylik sozlamalarini qo'llaydi. Xato bo'lsa matn qaytaradi."""
+    if "salary_mode" in data:
+        mode = str(data.get("salary_mode") or "").strip()
+        if mode not in dict(Teacher.SALARY_MODE_CHOICES):
+            return "Oylik usuli noto'g'ri"
+        teacher.salary_mode = mode
+
+    if "salary_per_student" in data:
+        try:
+            rate = int(data.get("salary_per_student") or 0)
+        except (TypeError, ValueError):
+            return "Stavka noto'g'ri"
+        if rate < 0:
+            return "Stavka manfiy bo'lishi mumkin emas"
+        teacher.salary_per_student = rate
+
+    if "salary_percent" in data:
+        try:
+            percent = round(float(data.get("salary_percent") or 0), 2)
+        except (TypeError, ValueError):
+            return "Foiz noto'g'ri"
+        if percent < 0 or percent > 100:
+            return "Foiz 0 va 100 orasida bo'lishi kerak"
+        teacher.salary_percent = percent
+
+    return None
+
+
 @csrf_exempt
 def update_salary_rate(request, teacher_id):
-    """Ustozning bir o'quvchi uchun stavkasini o'zgartiradi."""
+    """Ustozning oylik sozlamalari — usul, stavka yoki foiz."""
     if request.method != "PATCH":
         return JsonResponse({"error": "Method not allowed"}, status=405)
     denied = require_super(request)
@@ -637,16 +700,85 @@ def update_salary_rate(request, teacher_id):
     if not teacher:
         return JsonResponse({"error": "Ustoz topilmadi"}, status=404)
 
-    try:
-        rate = int(data.get("salary_per_student") or 0)
-    except (TypeError, ValueError):
-        return JsonResponse({"error": "Stavka noto'g'ri"}, status=400)
-    if rate < 0:
-        return JsonResponse({"error": "Stavka manfiy bo'lishi mumkin emas"}, status=400)
+    error = _apply_salary_settings(teacher, data)
+    if error:
+        return JsonResponse({"error": error}, status=400)
 
-    teacher.salary_per_student = rate
-    teacher.save(update_fields=["salary_per_student"])
-    return JsonResponse({"teacher_id": teacher.id, "salary_per_student": rate})
+    teacher.save(
+        update_fields=["salary_mode", "salary_per_student", "salary_percent"]
+    )
+
+    month = (data.get("month") or "").strip() or _current_month()
+    salary = TeacherSalary.objects.filter(teacher=teacher, month=month).first()
+    advances = list(TeacherAdvance.objects.filter(teacher=teacher, month=month))
+    return JsonResponse(
+        _salary_row(
+            teacher,
+            salary,
+            _students_count_map().get(teacher.id, 0),
+            advances,
+            _collected_map(month).get(teacher.id, 0),
+        )
+    )
+
+
+@csrf_exempt
+def bulk_salary_settings(request):
+    """Bir xil sozlamani bir nechta (yoki barcha) ustozga qo'yadi.
+
+    13 ta ustozga bitta-bitta stavka kiritish zerikarli — ko'pincha
+    hammasiga bir xil qiymat beriladi, keyin ayrimlari o'zgartiriladi.
+
+    Body: {teacher_ids?: [...], salary_mode?, salary_per_student?,
+           salary_percent?}. `teacher_ids` berilmasa hammasiga.
+    """
+    if request.method != "PATCH":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    data = _body(request)
+    if data is None:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    ids = data.get("teacher_ids")
+    qs = Teacher.objects.all()
+    if ids:
+        try:
+            qs = qs.filter(id__in=[int(x) for x in ids])
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "teacher_ids noto'g'ri"}, status=400)
+
+    teachers = list(qs)
+    if not teachers:
+        return JsonResponse({"error": "Ustoz topilmadi"}, status=404)
+
+    for teacher in teachers:
+        error = _apply_salary_settings(teacher, data)
+        if error:
+            return JsonResponse({"error": error}, status=400)
+
+    Teacher.objects.bulk_update(
+        teachers, ["salary_mode", "salary_per_student", "salary_percent"]
+    )
+
+    first = teachers[0]
+    detail = (
+        f"{first.salary_percent}%"
+        if first.salary_mode == "percent"
+        else f"{first.salary_per_student:,} so'm/o'quvchi".replace(",", " ")
+    )
+    log_action(
+        request,
+        "salary.settings",
+        f"{len(teachers)} ta ustozga oylik sozlamasi qo'yildi: {detail}",
+        target_type="teacher",
+        target_name=f"{len(teachers)} ustoz",
+        count=len(teachers),
+    )
+
+    return JsonResponse({"updated": len(teachers)})
 
 
 @csrf_exempt
@@ -694,7 +826,10 @@ def set_salary_amount(request, teacher_id):
     counts = _students_count_map()
     advances = list(TeacherAdvance.objects.filter(teacher=teacher, month=month))
     return JsonResponse(
-        _salary_row(teacher, salary, counts.get(teacher.id, 0), advances)
+        _salary_row(
+            teacher, salary, counts.get(teacher.id, 0), advances,
+            _collected_map(month).get(teacher.id, 0),
+        )
     )
 
 
@@ -731,7 +866,8 @@ def pay_salary(request, teacher_id):
         return JsonResponse({"error": "Bu oylik allaqachon to'langan"}, status=400)
 
     advances = list(TeacherAdvance.objects.filter(teacher=teacher, month=month))
-    row = _salary_row(teacher, salary, students_count, advances)
+    collected = _collected_map(month).get(teacher.id, 0)
+    row = _salary_row(teacher, salary, students_count, advances, collected)
     net = row["remaining"]
 
     if net <= 0:
@@ -769,7 +905,8 @@ def pay_salary(request, teacher_id):
     )
 
     return JsonResponse(
-        _salary_row(teacher, salary, students_count, advances), status=201
+        _salary_row(teacher, salary, students_count, advances, collected),
+        status=201,
     )
 
 
@@ -890,7 +1027,10 @@ def create_advance(request, teacher_id):
     return JsonResponse(
         {
             "advance_id": advance.id,
-            **_salary_row(teacher, salary, counts.get(teacher.id, 0), advances),
+            **_salary_row(
+            teacher, salary, counts.get(teacher.id, 0), advances,
+            _collected_map(month).get(teacher.id, 0),
+        ),
         },
         status=201,
     )
@@ -927,5 +1067,8 @@ def delete_advance(request, advance_id):
     counts = _students_count_map()
     advances = list(TeacherAdvance.objects.filter(teacher=teacher, month=month))
     return JsonResponse(
-        _salary_row(teacher, salary, counts.get(teacher.id, 0), advances)
+        _salary_row(
+            teacher, salary, counts.get(teacher.id, 0), advances,
+            _collected_map(month).get(teacher.id, 0),
+        )
     )

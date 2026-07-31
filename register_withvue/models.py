@@ -55,12 +55,33 @@ class Teacher(models.Model):
     penalty_limit = models.IntegerField(default=0)
     source = models.CharField(max_length=30, blank=True, default="")
 
-    # Oylik — bitta o'quvchi uchun stavka. Har oy default oylik shu
-    # stavka × ustozning o'quvchilari soni bo'lib chiqadi. Supermenejer
-    # o'sha oy uchun boshqa summa kiritsa, TeacherSalary.manual_amount
-    # ustunlik qiladi.
+    # ── Oylik hisoblash ──
+    # Ikki usul bor, ustozga qarab tanlanadi:
+    #   per_student — stavka × o'quvchilar soni (qat'iy summa)
+    #   percent     — o'sha ustozning o'quvchilaridan shu oy yig'ilgan
+    #                 pulning foizi
+    # Har ikkalasi ham "default" oylik beradi; supermenejer o'sha oy
+    # uchun qo'lda boshqa summa kiritsa (TeacherSalary.manual_amount)
+    # o'sha ustunlik qiladi.
+    SALARY_MODE_CHOICES = [
+        ("per_student", "O'quvchi soniga qarab"),
+        ("percent", "Yig'ilgan puldan foiz"),
+    ]
+
+    salary_mode = models.CharField(
+        max_length=12,
+        choices=SALARY_MODE_CHOICES,
+        default="per_student",
+        verbose_name="Oylik hisoblash usuli",
+    )
     salary_per_student = models.IntegerField(
         default=0, verbose_name="Bir o'quvchi uchun stavka"
+    )
+    salary_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=0,
+        verbose_name="Yig'ilgan puldan foiz (%)",
     )
 
     created_at = models.DateTimeField(auto_now_add=True)

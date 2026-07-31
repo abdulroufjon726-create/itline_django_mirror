@@ -14,6 +14,19 @@ class Manager(models.Model):
     phone = models.CharField(max_length=20, unique=True, verbose_name="Telefon")
     password = models.CharField(max_length=255, verbose_name="Parol (hash)")
     is_active = models.BooleanField(default=True, verbose_name="Faol")
+
+    # Supermenejer — menejerlarni yaratadi, ularning vakolatlarini
+    # belgilaydi, moliya va ustoz oyliklarini boshqaradi. Oddiy menejer
+    # bu bo'limlarni umuman ko'rmaydi.
+    is_super = models.BooleanField(default=False, verbose_name="Supermenejer")
+
+    # Menejerga berilgan vakolatlar — kalitlar ro'yxati (masalan
+    # ["payments.view", "groups.edit"]). Katalog views.PERMISSIONS'da.
+    # Supermenejer uchun bu maydon e'tiborga olinmaydi — unda hammasi bor.
+    permissions = models.JSONField(
+        default=list, blank=True, verbose_name="Vakolatlar"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -22,6 +35,11 @@ class Manager(models.Model):
 
     def __str__(self):
         return f"{self.name} {self.surname}"
+
+    def has_perm(self, key):
+        if self.is_super:
+            return True
+        return key in (self.permissions or [])
 
 
 # ─────────────────────────────────────────
@@ -36,6 +54,15 @@ class Teacher(models.Model):
     is_senior = models.BooleanField(default=False)
     penalty_limit = models.IntegerField(default=0)
     source = models.CharField(max_length=30, blank=True, default="")
+
+    # Oylik — bitta o'quvchi uchun stavka. Har oy default oylik shu
+    # stavka × ustozning o'quvchilari soni bo'lib chiqadi. Supermenejer
+    # o'sha oy uchun boshqa summa kiritsa, TeacherSalary.manual_amount
+    # ustunlik qiladi.
+    salary_per_student = models.IntegerField(
+        default=0, verbose_name="Bir o'quvchi uchun stavka"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -788,6 +815,140 @@ class Expense(models.Model):
 
     def __str__(self):
         return f"{self.title} — {self.amount}"
+
+
+class TeacherSalary(models.Model):
+    """Ustozning bir oylik oyligi.
+
+    Summa ikki yo'l bilan aniqlanadi: default — stavka × o'quvchilar
+    soni, yoki supermenejer qo'lda kiritgan `manual_amount`. "To'landi"
+    bosilganda xarajatlarga (Expense, kategoriya "salary") avtomatik
+    yoziladi — shu sababli `expense` bog'lanishi saqlanadi: yozuv bekor
+    qilinsa xarajat ham o'chiriladi.
+    """
+
+    teacher = models.ForeignKey(
+        Teacher, on_delete=models.CASCADE, related_name="salaries"
+    )
+    month = models.CharField(max_length=7, verbose_name="Oy (YYYY-MM)")
+
+    # Bo'sh bo'lsa stavka × o'quvchilar soni ishlatiladi
+    manual_amount = models.IntegerField(
+        null=True, blank=True, verbose_name="Qo'lda kiritilgan summa"
+    )
+    # To'lov paytidagi holat — keyin o'quvchilar soni o'zgarsa ham
+    # to'langan summa o'zgarmasligi uchun saqlanadi
+    students_count = models.IntegerField(default=0, verbose_name="O'quvchilar soni")
+    paid_amount = models.IntegerField(default=0, verbose_name="To'langan summa")
+
+    is_paid = models.BooleanField(default=False, verbose_name="To'landi")
+    paid_at = models.DateTimeField(null=True, blank=True)
+    note = models.CharField(max_length=255, blank=True, verbose_name="Izoh")
+
+    expense = models.ForeignKey(
+        "Expense",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="teacher_salaries",
+        verbose_name="Xarajat yozuvi",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("teacher", "month")
+        ordering = ["-month", "teacher__name"]
+        verbose_name = "Ustoz oyligi"
+        verbose_name_plural = "Ustoz oyliklari"
+
+    def __str__(self):
+        return f"{self.teacher} — {self.month}"
+
+
+class TeacherAdvance(models.Model):
+    """Ustoz oyligidan oldindan olgan pul (avans).
+
+    Ustozga oy o'rtasida pul kerak bo'lib qolsa shu yerga yoziladi:
+    darhol xarajatlarga tushadi va oy oxirida qoladigan oylikdan
+    ayiriladi — ya'ni bir pul ikki marta xarajat bo'lib ketmaydi.
+    """
+
+    teacher = models.ForeignKey(
+        Teacher, on_delete=models.CASCADE, related_name="advances"
+    )
+    month = models.CharField(max_length=7, verbose_name="Oy (YYYY-MM)")
+    amount = models.IntegerField(default=0, verbose_name="Summa")
+    note = models.CharField(max_length=255, blank=True, verbose_name="Izoh")
+    date = models.DateField(default=timezone.now, verbose_name="Sana")
+
+    expense = models.ForeignKey(
+        "Expense",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="teacher_advances",
+        verbose_name="Xarajat yozuvi",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date", "-created_at"]
+        verbose_name = "Ustoz avansi"
+        verbose_name_plural = "Ustoz avanslari"
+
+    def __str__(self):
+        return f"{self.teacher} — {self.month} — {self.amount}"
+
+
+class LoginDevice(models.Model):
+    """Panelga kirgan qurilma.
+
+    Loyihada sessiya/token yo'q, shuning uchun qurilma brauzerda bir
+    marta yaratiladigan `device_id` (localStorage) bilan aniqlanadi.
+    Supermenejer kirishlar tarixini ko'radi va shubhali qurilmani
+    bloklab qo'yishi mumkin — bloklangan qurilmadan login o'tmaydi.
+    """
+
+    ROLE_CHOICES = [
+        ("manager", "Menejer"),
+        ("super", "Supermenejer"),
+        ("teacher", "Ustoz"),
+        ("student", "O'quvchi"),
+    ]
+
+    device_id = models.CharField(max_length=64, db_index=True, verbose_name="Qurilma ID")
+    phone = models.CharField(max_length=20, db_index=True, verbose_name="Telefon")
+    role = models.CharField(max_length=10, choices=ROLE_CHOICES, default="manager")
+    user_name = models.CharField(max_length=200, blank=True, verbose_name="Kim")
+
+    manager = models.ForeignKey(
+        Manager,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="devices",
+    )
+
+    user_agent = models.CharField(max_length=400, blank=True, verbose_name="Brauzer")
+    ip = models.CharField(max_length=64, blank=True, verbose_name="IP manzil")
+    login_count = models.IntegerField(default=0, verbose_name="Kirishlar soni")
+
+    is_blocked = models.BooleanField(default=False, verbose_name="Bloklangan")
+    blocked_at = models.DateTimeField(null=True, blank=True)
+
+    first_seen = models.DateTimeField(auto_now_add=True)
+    last_seen = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("device_id", "phone")
+        ordering = ["-last_seen"]
+        verbose_name = "Kirgan qurilma"
+        verbose_name_plural = "Kirgan qurilmalar"
+
+    def __str__(self):
+        return f"{self.user_name or self.phone} — {self.device_id[:8]}"
 
 
 class LessonReminderLog(models.Model):

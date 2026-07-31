@@ -40,6 +40,14 @@ from django.utils import timezone
 from django.conf import settings
 from rest_framework import generics, permissions
 from .serializers import NewsSerializer
+from .access import (
+    DEFAULT_PERMISSIONS,
+    caller_manager,
+    is_device_blocked,
+    record_login,
+    require_permission,
+    require_super,
+)
 
 # Parollar kodda saqlanmaydi — settings orqali env'dan keladi (.env / Render)
 ADMIN_PASSWORD = settings.ADMIN_PASSWORD
@@ -428,9 +436,18 @@ def sync_payment_ontime_coin(payment):
 
 @csrf_exempt
 def manager_register(request):
-    """Yangi menejer yaratish."""
+    """Yangi menejer yaratish — faqat supermenejer.
+
+    Eski menejer panelidagi "menejer qo'shish" formasi olib tashlandi;
+    yangi menejer supermenejer bo'limida vakolatlari bilan birga
+    yaratiladi (`super_views.create_super_managed_manager`). Bu endpoint
+    eski mijozlar uchun qoldirilgan, lekin endi super talab qiladi.
+    """
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_super(request)
+    if denied:
+        return denied
     try:
         data = json.loads(request.body)
         phone = data.get("phone", "").strip()
@@ -450,6 +467,7 @@ def manager_register(request):
             surname=data.get("surname", "").strip(),
             phone=phone,
             password=make_password(data.get("password", "")),
+            permissions=list(DEFAULT_PERMISSIONS),
         )
         return JsonResponse(
             {
@@ -458,6 +476,7 @@ def manager_register(request):
                 "surname": manager.surname,
                 "phone": manager.phone,
                 "role": "manager",
+                "permissions": manager.permissions,
             },
             status=201,
         )
@@ -500,6 +519,20 @@ def manager_login(request):
         if not check_password(password, manager.password):
             return JsonResponse({"error": "Parol noto'g'ri"}, status=401)
 
+        if is_device_blocked(request, manager.phone):
+            return JsonResponse(
+                {"error": "Bu qurilma bloklangan — supermenejerga murojaat qiling"},
+                status=403,
+            )
+
+        record_login(
+            request,
+            phone=manager.phone,
+            role="super" if manager.is_super else "manager",
+            user_name=f"{manager.name} {manager.surname}".strip(),
+            manager=manager,
+        )
+
         return JsonResponse(
             {
                 "id": manager.id,
@@ -508,6 +541,10 @@ def manager_login(request):
                 "phone": manager.phone,
                 "role": "manager",
                 "is_active": manager.is_active,
+                "is_super": manager.is_super,
+                # Supermenejerda cheklov yo'q — frontend buni is_super
+                # orqali biladi, ro'yxat faqat oddiy menejer uchun
+                "permissions": manager.permissions or [],
             }
         )
     except json.JSONDecodeError:
@@ -524,7 +561,13 @@ def get_managers(request):
             qs = qs.filter(is_active=True)
         managers = list(
             qs.order_by("name", "surname").values(
-                "id", "name", "surname", "phone", "is_active", "created_at"
+                "id",
+                "name",
+                "surname",
+                "phone",
+                "is_active",
+                "is_super",
+                "created_at",
             )
         )
         return JsonResponse(managers, safe=False)
@@ -534,10 +577,13 @@ def get_managers(request):
 
 @csrf_exempt
 def update_manager(request, manager_id):
-    """Menejer ma'lumotlarini yangilash."""
+    """Menejer ma'lumotlarini yangilash.
+
+    Supermenejer yoki 'managers.edit' vakolati bor menejer qila oladi.
+    """
     if request.method != "PATCH":
         return JsonResponse({"error": "Method not allowed"}, status=405)
-    denied = _require_staff(request)
+    denied = _require_staff(request) or require_permission(request, "managers.edit")
     if denied:
         return denied
     try:
@@ -545,6 +591,13 @@ def update_manager(request, manager_id):
         manager = Manager.objects.filter(id=manager_id).first()
         if not manager:
             return JsonResponse({"error": "Menejer topilmadi"}, status=404)
+
+        # Supermenejer akkauntiga faqat supermenejerning o'zi tega oladi
+        if manager.is_super and not _caller_is_super(request):
+            return JsonResponse(
+                {"error": "Supermenejer ma'lumotini faqat supermenejer o'zgartiradi"},
+                status=403,
+            )
 
         if "name" in data:
             manager.name = data["name"].strip()
@@ -589,13 +642,17 @@ def delete_manager(request, manager_id):
     """Menejerni o'chirish (deaktivatsiya)."""
     if request.method != "DELETE":
         return JsonResponse({"error": "Method not allowed"}, status=405)
-    denied = _require_staff(request)
+    denied = _require_staff(request) or require_permission(request, "managers.edit")
     if denied:
         return denied
     try:
         manager = Manager.objects.filter(id=manager_id).first()
         if not manager:
             return JsonResponse({"error": "Menejer topilmadi"}, status=404)
+        if manager.is_super:
+            return JsonResponse(
+                {"error": "Supermenejerni o'chirib bo'lmaydi"}, status=403
+            )
         manager.is_active = False
         manager.save()
         return JsonResponse({"message": "Menejer deaktivatsiya qilindi!"})
@@ -1149,6 +1206,45 @@ def _require_staff(request):
         {"error": "Bu amal uchun menejer yoki ustoz sifatida kirish kerak"},
         status=403,
     )
+
+
+def _caller_is_super(request):
+    """Chaqiruvchi supermenejermi."""
+    manager = caller_manager(request)
+    return bool(manager and manager.is_super)
+
+
+def _caller_own_teacher(request):
+    """Chaqiruvchi oddiy ustoz bo'lsa — uning Teacher yozuvi.
+
+    Ustoz boshqa ustozning guruhlarini ko'rmasligi uchun ishlatiladi.
+    Menejer va panel darajasidagi (is_excellence) foydalanuvchilar uchun
+    None qaytaradi — ular hamma guruhni ko'raveradi. Sarlavha
+    bo'lmasa ham None: eski mijozlar ishlashda davom etadi.
+    """
+    phone = (request.headers.get("X-User-Phone") or "").strip()
+    if not phone:
+        return None
+    if _find_manager_by_any_phone(phone):
+        return None
+
+    # Panel darajasidagi o'quvchi profili (menejer huquqi) — cheklanmaydi
+    key = _phone_key(phone)
+    if len(key) >= MIN_PHONE_KEY_LEN:
+        panel_user = next(
+            (
+                s
+                for s in Student.objects.filter(is_excellence=True).only(
+                    "id", "phone", "phone2"
+                )
+                if _phone_key(s.phone) == key or _phone_key(s.phone2) == key
+            ),
+            None,
+        )
+        if panel_user:
+            return None
+
+    return _find_teacher_by_any_phone(phone)
 
 
 def _real_students():
@@ -1872,6 +1968,18 @@ def login_student(request):
                 break
 
         if student and password_ok:
+            if is_device_blocked(request, student.phone):
+                return JsonResponse(
+                    {"error": "Bu qurilma bloklangan — menejerga murojaat qiling"},
+                    status=403,
+                )
+            record_login(
+                request,
+                phone=student.phone,
+                # Ustozlarning panel profili — is_admin bo'lgan o'quvchi
+                role="teacher" if (student.is_admin or student.is_excellence) else "student",
+                user_name=f"{student.name} {student.surname}".strip(),
+            )
             return JsonResponse(
                 {
                     "exists": True,
@@ -1891,6 +1999,17 @@ def login_student(request):
 
         teacher = _find_teacher_by_any_phone(phone)
         if teacher and teacher.password and check_password(password, teacher.password):
+            if is_device_blocked(request, teacher.phone):
+                return JsonResponse(
+                    {"error": "Bu qurilma bloklangan — menejerga murojaat qiling"},
+                    status=403,
+                )
+            record_login(
+                request,
+                phone=teacher.phone,
+                role="teacher",
+                user_name=teacher.name,
+            )
             return JsonResponse(
                 {
                     "exists": True,
@@ -3168,11 +3287,27 @@ def reject_payment_request(request, req_id):
 
 
 def get_groups(request):
-    """Barcha guruhlar."""
+    """Guruhlar ro'yxati.
+
+    Ustoz faqat o'z guruhlarini ko'radi — boshqa ustozning guruhi
+    umuman qaytarilmaydi. Menejer va admin o'quvchi hammasini ko'radi.
+    Chaqiruvchi 'X-User-Phone' orqali aniqlanadi; sarlavha bo'lmasa
+    (eski mijoz) eski holat — hammasi qaytariladi.
+    """
     try:
         groups = Group.objects.select_related("teacher", "course").prefetch_related(
             "students"
         )
+
+        teacher = _caller_own_teacher(request)
+        if teacher:
+            groups = groups.filter(teacher_id=teacher.id)
+        elif request.GET.get("teacher_id"):
+            try:
+                groups = groups.filter(teacher_id=int(request.GET["teacher_id"]))
+            except ValueError:
+                return JsonResponse({"error": "Invalid teacher_id"}, status=400)
+
         serializer = GroupSerializer(groups, many=True)
         return JsonResponse(serializer.data, safe=False)
     except Exception as e:
@@ -3193,6 +3328,11 @@ def get_group(request, group_id):
             .first()
         )
         if not group:
+            return JsonResponse({"error": "Guruh topilmadi"}, status=404)
+
+        # Ustoz o'zganing guruhini ID orqali ham ocha olmasin
+        teacher = _caller_own_teacher(request)
+        if teacher and group.teacher_id != teacher.id:
             return JsonResponse({"error": "Guruh topilmadi"}, status=404)
         serializer = GroupSerializer(group)
         return JsonResponse(serializer.data, safe=False)
@@ -4356,11 +4496,18 @@ def delete_news(request, news_id):
 
 # ─────────────────────────────
 # EXPENSES (XARAJATLAR)
+#
+# Moliya bo'limi supermenejerga o'tkazildi — oddiy menejer xarajat va
+# foyda/zararni ko'rmaydi. Shuning uchun quyidagi hamma endpoint
+# `require_super` bilan yopilgan.
 # ─────────────────────────────
 
 
 def get_expenses(request):
     """Barcha xarajatlar (ixtiyoriy: oy bo'yicha filter)."""
+    denied = require_super(request)
+    if denied:
+        return denied
     try:
         month = request.GET.get("month", "").strip()
         qs = Expense.objects.all().order_by("-date", "-created_at")
@@ -4396,6 +4543,9 @@ def create_expense(request):
     """Yangi xarajat qo'shish."""
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_super(request)
+    if denied:
+        return denied
     try:
         data = json.loads(request.body)
         title = data.get("title", "").strip()
@@ -4459,6 +4609,9 @@ def update_expense(request, expense_id):
     """Xarajatni yangilash."""
     if request.method != "PATCH":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_super(request)
+    if denied:
+        return denied
     try:
         data = json.loads(request.body)
         try:
@@ -4513,6 +4666,9 @@ def delete_expense(request, expense_id):
     """Xarajatni o'chirish."""
     if request.method != "DELETE":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_super(request)
+    if denied:
+        return denied
     try:
         try:
             expense_id = int(expense_id)
@@ -4529,6 +4685,9 @@ def delete_expense(request, expense_id):
 
 
 def get_finance_summary(request):
+    denied = require_super(request)
+    if denied:
+        return denied
     try:
         month = request.GET.get("month", datetime.now().strftime("%Y-%m")).strip()
         try:

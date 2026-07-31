@@ -17,8 +17,17 @@ from .models import (
 
 @admin.register(Manager)
 class ManagerAdmin(admin.ModelAdmin):
-    list_display = ("id", "name", "surname", "phone", "is_active", "created_at")
-    list_filter = ("is_active",)
+    list_display = (
+        "id",
+        "name",
+        "surname",
+        "phone",
+        "is_super",
+        "is_active",
+        "created_at",
+    )
+    list_filter = ("is_active", "is_super")
+    list_editable = ("is_super",)
     search_fields = ("name", "phone")
     ordering = ("-created_at",)
 

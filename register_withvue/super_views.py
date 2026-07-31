@@ -7,6 +7,7 @@ qurilmalar ro'yxati.
 """
 
 import json
+from datetime import timedelta
 
 from django.db import models as db_models, transaction
 from django.http import JsonResponse
@@ -15,14 +16,18 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from .access import (
+    ACTIONS,
     DEFAULT_PERMISSIONS,
+    action_catalog,
     clean_permissions,
     find_manager_by_phone,
+    log_action,
     permission_catalog,
     phone_key,
     require_super,
 )
 from .models import (
+    ActivityLog,
     Expense,
     LoginDevice,
     Manager,
@@ -125,7 +130,63 @@ def create_super_managed_manager(request):
         password=make_password(password),
         permissions=permissions,
     )
+    log_action(
+        request,
+        "manager.create",
+        f"{manager.name} {manager.surname} menejer qilib qo'shildi — "
+        f"{len(permissions)} ta vakolat",
+        target_type="manager",
+        target_id=manager.id,
+        target_name=f"{manager.name} {manager.surname}".strip(),
+        permissions=permissions,
+    )
     return JsonResponse(_manager_row(manager), status=201)
+
+
+@csrf_exempt
+def set_manager_password(request, manager_id):
+    """Menejerning parolini almashtiradi.
+
+    Supermenejer menejer parolini unutgan yoki xodim ketgan holatda
+    tiklay olishi kerak. Eski parol so'ralmaydi — bu supermenejerning
+    vakolati. Supermenejer akkauntlariga tegilmaydi.
+    """
+    if request.method != "PATCH":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    data = _body(request)
+    if data is None:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    manager = Manager.objects.filter(id=manager_id).first()
+    if not manager:
+        return JsonResponse({"error": "Menejer topilmadi"}, status=404)
+    if manager.is_super:
+        return JsonResponse(
+            {"error": "Supermenejer parolini bu yerdan o'zgartirib bo'lmaydi"},
+            status=400,
+        )
+
+    password = (data.get("password") or "").strip()
+    if len(password) < 4:
+        return JsonResponse(
+            {"error": "Parol kamida 4 belgidan iborat bo'lishi kerak"}, status=400
+        )
+
+    manager.password = make_password(password)
+    manager.save(update_fields=["password"])
+    log_action(
+        request,
+        "manager.password",
+        f"{manager.name} {manager.surname} paroli almashtirildi".strip(),
+        target_type="manager",
+        target_id=manager.id,
+        target_name=f"{manager.name} {manager.surname}".strip(),
+    )
+    return JsonResponse({"message": "Parol yangilandi", "id": manager.id})
 
 
 @csrf_exempt
@@ -149,8 +210,28 @@ def update_manager_permissions(request, manager_id):
             {"error": "Supermenejerning vakolatlari cheklanmaydi"}, status=400
         )
 
+    before = set(manager.permissions or [])
     manager.permissions = clean_permissions(data.get("permissions") or [])
     manager.save(update_fields=["permissions"])
+
+    after = set(manager.permissions)
+    added, removed = sorted(after - before), sorted(before - after)
+    parts = []
+    if added:
+        parts.append(f"+{len(added)}")
+    if removed:
+        parts.append(f"−{len(removed)}")
+    change = ", ".join(parts) or "o'zgarishsiz"
+    log_action(
+        request,
+        "manager.permissions",
+        f"{manager.name} vakolatlari: {change} (jami {len(after)})",
+        target_type="manager",
+        target_id=manager.id,
+        target_name=f"{manager.name} {manager.surname}".strip(),
+        added=added,
+        removed=removed,
+    )
     return JsonResponse(_manager_row(manager))
 
 
@@ -213,7 +294,232 @@ def set_device_blocked(request, device_pk):
     device.is_blocked = blocked
     device.blocked_at = timezone.now() if blocked else None
     device.save(update_fields=["is_blocked", "blocked_at"])
+    log_action(
+        request,
+        "device.block",
+        f"{device.user_name or device.phone} qurilmasi "
+        + ("bloklandi" if blocked else "blokdan chiqarildi"),
+        target_type="device",
+        target_id=device.id,
+        target_name=device.user_name or device.phone,
+        is_blocked=blocked,
+    )
     return JsonResponse({"id": device.id, "is_blocked": device.is_blocked})
+
+
+# ─────────────────────────────────────────
+# BOSH SAHIFA
+# ─────────────────────────────────────────
+
+
+def get_overview(request):
+    """Supermenejer bosh sahifasi — bir qarashda butun markaz holati."""
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    from .models import Payment, PaymentRequest
+
+    month = (request.GET.get("month") or "").strip() or _current_month()
+    now = timezone.now()
+
+    students = Student.objects.filter(
+        is_admin=False, is_excellence=False, is_graduate=False
+    )
+    payments = Payment.objects.filter(month=month)
+
+    collected = sum(p.paid_amount or 0 for p in payments)
+    expected = sum(max(0, (p.amount_due or 0) - (p.discount or 0)) for p in payments)
+
+    try:
+        year, mon = month.split("-")
+        expenses = Expense.objects.filter(date__year=int(year), date__month=int(mon))
+    except ValueError:
+        expenses = Expense.objects.none()
+    spent = sum(e.amount or 0 for e in expenses)
+
+    # Oyliklar: shu oy uchun to'lanmagan ustozlar
+    counts = _students_count_map()
+    salaries = {s.teacher_id: s for s in TeacherSalary.objects.filter(month=month)}
+    unpaid_salaries = 0
+    for t in Teacher.objects.all():
+        s = salaries.get(t.id)
+        if s and s.is_paid:
+            continue
+        manual = s.manual_amount if s else None
+        amount = (
+            (t.salary_per_student or 0) * counts.get(t.id, 0)
+            if manual is None
+            else manual
+        )
+        if amount > 0:
+            unpaid_salaries += amount
+
+    return JsonResponse(
+        {
+            "month": month,
+            "students": students.count(),
+            "teachers": Teacher.objects.count(),
+            "groups": _group_count(),
+            "managers": Manager.objects.filter(is_active=True, is_super=False).count(),
+            "collected": collected,
+            "expected": expected,
+            "spent": spent,
+            "profit": collected - spent,
+            "unpaid_salaries": unpaid_salaries,
+            "pending_requests": PaymentRequest.objects.filter(
+                status="pending"
+            ).count(),
+            "devices_total": LoginDevice.objects.count(),
+            "devices_blocked": LoginDevice.objects.filter(is_blocked=True).count(),
+            "activity_today": ActivityLog.objects.filter(
+                created_at__gte=now - timedelta(days=1)
+            ).count(),
+        }
+    )
+
+
+def _group_count():
+    from .models import Group
+
+    return Group.objects.count()
+
+
+# ─────────────────────────────────────────
+# HARAKATLAR JURNALI
+# ─────────────────────────────────────────
+
+
+def get_activity(request):
+    """Panelda kim nima qilgani.
+
+    Filtrlar: ?manager_id= ?action= ?days= ?search= ?limit= ?before_id=
+    `before_id` — "yana yuklash" uchun: shu ID'dan eskiroqlari qaytadi.
+    """
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    qs = ActivityLog.objects.all()
+
+    manager_id = request.GET.get("manager_id")
+    if manager_id:
+        try:
+            qs = qs.filter(manager_id=int(manager_id))
+        except ValueError:
+            return JsonResponse({"error": "manager_id noto'g'ri"}, status=400)
+
+    action = request.GET.get("action")
+    if action:
+        # "payment" kabi prefiks ham ishlaydi — butun bo'lim bo'yicha filtr
+        qs = qs.filter(action=action) if "." in action else qs.filter(
+            action__startswith=f"{action}."
+        )
+
+    days = request.GET.get("days")
+    if days:
+        try:
+            since = timezone.now() - timedelta(days=int(days))
+            qs = qs.filter(created_at__gte=since)
+        except ValueError:
+            return JsonResponse({"error": "days noto'g'ri"}, status=400)
+
+    search = (request.GET.get("search") or "").strip()
+    if search:
+        qs = qs.filter(
+            db_models.Q(description__icontains=search)
+            | db_models.Q(actor_name__icontains=search)
+            | db_models.Q(target_name__icontains=search)
+        )
+
+    before_id = request.GET.get("before_id")
+    if before_id:
+        try:
+            qs = qs.filter(id__lt=int(before_id))
+        except ValueError:
+            return JsonResponse({"error": "before_id noto'g'ri"}, status=400)
+
+    try:
+        limit = min(200, max(1, int(request.GET.get("limit") or 60)))
+    except ValueError:
+        limit = 60
+
+    rows = [
+        {
+            "id": a.id,
+            "actor_name": a.actor_name,
+            "actor_phone": a.actor_phone,
+            "actor_role": a.actor_role,
+            "manager_id": a.manager_id,
+            "action": a.action,
+            "action_label": ACTIONS.get(a.action, a.action),
+            "description": a.description,
+            "target_type": a.target_type,
+            "target_id": a.target_id,
+            "target_name": a.target_name,
+            "meta": a.meta,
+            "ip": a.ip,
+            "created_at": a.created_at,
+        }
+        for a in qs.select_related("manager")[:limit]
+    ]
+
+    return JsonResponse(
+        {
+            "rows": rows,
+            "actions": action_catalog(),
+            "has_more": len(rows) == limit,
+        }
+    )
+
+
+def get_activity_summary(request):
+    """Bosh sahifa uchun: kim nechta amal qilgan (oxirgi N kun)."""
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    try:
+        days = int(request.GET.get("days") or 7)
+    except ValueError:
+        days = 7
+    since = timezone.now() - timedelta(days=days)
+
+    recent = ActivityLog.objects.filter(created_at__gte=since)
+
+    by_actor = (
+        recent.exclude(actor_name="")
+        .values("actor_name", "actor_role", "manager_id")
+        .annotate(n=db_models.Count("id"))
+        .order_by("-n")[:10]
+    )
+    by_action = (
+        recent.values("action").annotate(n=db_models.Count("id")).order_by("-n")[:8]
+    )
+
+    return JsonResponse(
+        {
+            "days": days,
+            "total": recent.count(),
+            "by_actor": [
+                {
+                    "name": r["actor_name"],
+                    "role": r["actor_role"],
+                    "manager_id": r["manager_id"],
+                    "count": r["n"],
+                }
+                for r in by_actor
+            ],
+            "by_action": [
+                {
+                    "action": r["action"],
+                    "label": ACTIONS.get(r["action"], r["action"]),
+                    "count": r["n"],
+                }
+                for r in by_action
+            ],
+        }
+    )
 
 
 # ─────────────────────────────────────────
@@ -450,6 +756,18 @@ def pay_salary(request, teacher_id):
     salary.expense = expense
     salary.save()
 
+    log_action(
+        request,
+        "salary.pay",
+        f"{teacher.name} — {month} oyligi {net:,} so'm to'landi".replace(",", " "),
+        target_type="teacher",
+        target_id=teacher.id,
+        target_name=teacher.name,
+        month=month,
+        amount=net,
+        advance_total=row["advance_total"],
+    )
+
     return JsonResponse(
         _salary_row(teacher, salary, students_count, advances), status=201
     )
@@ -484,6 +802,17 @@ def unpay_salary(request, teacher_id):
     salary.paid_amount = 0
     salary.expense = None
     salary.save()
+
+    log_action(
+        request,
+        "salary.unpay",
+        f"{salary.teacher.name} — {month} oylik to'lovi bekor qilindi, "
+        "xarajat yozuvi ham o'chirildi",
+        target_type="teacher",
+        target_id=salary.teacher_id,
+        target_name=salary.teacher.name,
+        month=month,
+    )
 
     counts = _students_count_map()
     advances = list(
@@ -543,6 +872,17 @@ def create_advance(request, teacher_id):
         note=note,
         date=timezone.localdate(),
         expense=expense,
+    )
+    log_action(
+        request,
+        "salary.advance",
+        f"{teacher.name} — {month} oyligidan {amount:,} so'm avans".replace(",", " ")
+        + (f" ({note})" if note else ""),
+        target_type="teacher",
+        target_id=teacher.id,
+        target_name=teacher.name,
+        month=month,
+        amount=amount,
     )
 
     counts = _students_count_map()

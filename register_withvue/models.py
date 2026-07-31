@@ -951,6 +951,55 @@ class LoginDevice(models.Model):
         return f"{self.user_name or self.phone} — {self.device_id[:8]}"
 
 
+class ActivityLog(models.Model):
+    """Panelda kim nima qilgani — supermenejer uchun.
+
+    Har bir o'zgartiruvchi amal (to'lov tasdiqlash, chegirma, o'quvchi
+    o'chirish, guruh tahriri, xabar yuborish ...) shu yerga yoziladi.
+    Maqsad — supermenejer menejerlar nima qilayotganini ko'rib tura
+    olsin va kerak bo'lsa kim qachon nima qilganini topa olsin.
+
+    Yozuv o'chirilgan obyektdan keyin ham qolishi kerak, shuning uchun
+    ForeignKey emas, `target_type` + `target_id` + `target_name`
+    saqlanadi.
+    """
+
+    # Kim
+    actor_phone = models.CharField(max_length=20, db_index=True, blank=True)
+    actor_name = models.CharField(max_length=200, blank=True, verbose_name="Kim")
+    actor_role = models.CharField(max_length=10, blank=True, verbose_name="Roli")
+    manager = models.ForeignKey(
+        Manager,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="activity",
+    )
+
+    # Nima
+    action = models.CharField(max_length=50, db_index=True, verbose_name="Amal")
+    description = models.CharField(max_length=300, verbose_name="Tavsif")
+
+    # Nimaga
+    target_type = models.CharField(max_length=30, blank=True)
+    target_id = models.IntegerField(null=True, blank=True)
+    target_name = models.CharField(max_length=200, blank=True)
+
+    # Qo'shimcha tafsilot (eski/yangi qiymat kabi)
+    meta = models.JSONField(default=dict, blank=True)
+
+    ip = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Harakat yozuvi"
+        verbose_name_plural = "Harakatlar jurnali"
+
+    def __str__(self):
+        return f"{self.actor_name} — {self.action}"
+
+
 class LessonReminderLog(models.Model):
     """Darsdan oldingi telegram eslatmasi yuborilganini belgilaydi.
 

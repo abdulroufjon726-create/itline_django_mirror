@@ -44,6 +44,8 @@ from .access import (
     DEFAULT_PERMISSIONS,
     caller_manager,
     is_device_blocked,
+    log_action,
+    log_attendance,
     record_login,
     require_permission,
     require_super,
@@ -630,6 +632,20 @@ def update_manager(request, manager_id):
         if "is_active" in data:
             manager.is_active = data["is_active"]
         manager.save()
+        log_action(
+            request,
+            "manager.update",
+            f"{manager.name} {manager.surname} — ".strip()
+            + (
+                ("tiklandi" if manager.is_active else "faolsizlantirildi")
+                if "is_active" in data
+                else ", ".join(sorted(data.keys()))
+            ),
+            target_type="manager",
+            target_id=manager.id,
+            target_name=f"{manager.name} {manager.surname}".strip(),
+            fields=sorted(data.keys()),
+        )
         return JsonResponse({"message": "Menejer ma'lumotlari yangilandi!"})
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
@@ -655,6 +671,14 @@ def delete_manager(request, manager_id):
             )
         manager.is_active = False
         manager.save()
+        log_action(
+            request,
+            "manager.delete",
+            f"{manager.name} {manager.surname} menejerligi o'chirildi".strip(),
+            target_type="manager",
+            target_id=manager.id,
+            target_name=f"{manager.name} {manager.surname}".strip(),
+        )
         return JsonResponse({"message": "Menejer deaktivatsiya qilindi!"})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
@@ -900,6 +924,14 @@ def create_teacher(request):
             password=make_password(ADMIN_PASSWORD),
             is_senior=data.get("is_senior", False),
         )
+        log_action(
+            request,
+            "teacher.create",
+            f"{name} ustoz sifatida qo'shildi ({phone})",
+            target_type="teacher",
+            target_id=teacher.id,
+            target_name=name,
+        )
         return JsonResponse(
             {"id": teacher.id, "name": teacher.name, "phone": teacher.phone}, status=201
         )
@@ -963,6 +995,22 @@ def delete_teacher(request, teacher_id):
 
             name = teacher.name
             teacher.delete()
+
+        log_action(
+            request,
+            "teacher.delete",
+            f"{name} o'chirildi — {moved} ta o'quvchi "
+            + (
+                f"{to_teacher.name}ga o'tkazildi"
+                if to_teacher
+                else "biriktirilmagan holga tushdi"
+            ),
+            target_type="teacher",
+            target_id=teacher_id,
+            target_name=name,
+            students_moved=moved,
+            to_teacher=to_teacher.name if to_teacher else None,
+        )
 
         return JsonResponse(
             {
@@ -1069,6 +1117,17 @@ def update_teacher(request, teacher_id):
                     if _phones_match(prof.phone2, teacher.phone):
                         prof.phone2 = ""
                 prof.save(update_fields=["phone", "phone2"])
+
+        log_action(
+            request,
+            "teacher.update",
+            f"{teacher.name} ma'lumoti tahrirlandi: "
+            + (", ".join(sorted(data.keys())) or "o'zgarishsiz"),
+            target_type="teacher",
+            target_id=teacher.id,
+            target_name=teacher.name,
+            fields=sorted(data.keys()),
+        )
 
         return JsonResponse(
             {
@@ -1439,6 +1498,17 @@ def transfer_students(request):
                 .update(teacher_id=to_teacher.id, manual_teacher=True)
             )
 
+        log_action(
+            request,
+            "student.transfer",
+            f"{moved} ta o'quvchi {to_teacher.name}ga ko'chirildi",
+            target_type="teacher",
+            target_id=to_teacher.id,
+            target_name=to_teacher.name,
+            count=moved,
+            groups_detached=detached,
+        )
+
         return JsonResponse(
             {
                 "message": f"{moved} ta o'quvchi {to_teacher.name}ga o'tkazildi",
@@ -1594,6 +1664,23 @@ def update_student(request, student_id):
                 if p.discount != new_disc:
                     p.discount = new_disc
                     p.save(update_fields=["discount"])
+
+        # Doimiy chegirma o'zgarishi pulga tegadi — alohida ko'rsatamiz
+        if monthly_discount_changed:
+            detail = (
+                f"doimiy chegirma {student.monthly_discount:,} so'm".replace(",", " ")
+            )
+        else:
+            detail = ", ".join(sorted(data.keys())) or "o'zgarishsiz"
+        log_action(
+            request,
+            "student.update",
+            f"{student.name} {student.surname} — {detail}".strip(),
+            target_type="student",
+            target_id=student.id,
+            target_name=f"{student.name} {student.surname}".strip(),
+            fields=sorted(data.keys()),
+        )
 
         wallet = compute_wallet(student)
         return JsonResponse(
@@ -1910,6 +1997,22 @@ def register_student(request):
         TelegramSubscriber.objects.filter(
             phone=_digits9(phone), student__isnull=True
         ).update(student=student)
+
+        role = (
+            "menejer profili"
+            if student.is_excellence
+            else "ustoz profili" if student.is_admin else "o'quvchi"
+        )
+        log_action(
+            request,
+            "student.create",
+            f"{student.name} {student.surname} qo'shildi — {role}"
+            + (f", ustoz {student.teacher.name}" if student.teacher else ""),
+            target_type="student",
+            target_id=student.id,
+            target_name=f"{student.name} {student.surname}".strip(),
+            role=role,
+        )
 
         return JsonResponse(
             {
@@ -2235,6 +2338,14 @@ def update_attendance(request, attendance_id):
 
             attendance.status = new_status
             attendance.save()
+
+        lesson = attendance.lesson
+        log_attendance(
+            request,
+            lesson_id=lesson.id,
+            group_name=(lesson.group.name if lesson.group else lesson.title),
+            date_label=str(lesson.date),
+        )
 
         return JsonResponse(
             {
@@ -2857,6 +2968,18 @@ def generate_payments(request):
         if not_opened_count:
             msg += f" {not_opened_count} ta o'quvchi guruhi bu oydan keyin ochilgani uchun o'tkazib yuborildi."
 
+        log_action(
+            request,
+            "payment.generate",
+            f"{month} uchun to'lovlar yaratildi — {created_count} ta yangi, "
+            f"{skipped_count} ta mavjud edi",
+            target_type="month",
+            target_name=month,
+            month=month,
+            created=created_count,
+            skipped=skipped_count,
+        )
+
         return JsonResponse(
             {
                 "message": msg,
@@ -2887,6 +3010,11 @@ def confirm_payment(request, payment_id):
         payment = Payment.objects.filter(id=payment_id).first()
         if not payment:
             return JsonResponse({"error": "To'lov topilmadi"}, status=404)
+
+        # Jurnal uchun — nima o'zgarganini keyin solishtiramiz
+        paid_before = payment.is_paid
+        paid_amount_before = payment.paid_amount
+        discount_before = payment.discount
 
         if "amount_due" in data:
             try:
@@ -2933,6 +3061,36 @@ def confirm_payment(request, payment_id):
             logging.getLogger(__name__).exception("payment ontime coin xatosi")
 
         wallet = compute_wallet(payment.student) if payment.student_id else {}
+
+        student_label = str(payment.student) if payment.student_id else "—"
+        if payment.discount != discount_before:
+            log_action(
+                request,
+                "payment.discount",
+                f"{student_label} — {payment.month} chegirma: "
+                f"{discount_before:,} → {payment.discount:,}".replace(",", " "),
+                target_type="payment",
+                target_id=payment.id,
+                target_name=student_label,
+                month=payment.month,
+                before=discount_before,
+                after=payment.discount,
+            )
+        if payment.is_paid != paid_before or payment.paid_amount != paid_amount_before:
+            state = "to'landi" if payment.is_paid else "to'lanmagan"
+            log_action(
+                request,
+                "payment.confirm",
+                f"{student_label} — {payment.month}: {state}, "
+                f"{payment.paid_amount:,} so'm".replace(",", " "),
+                target_type="payment",
+                target_id=payment.id,
+                target_name=student_label,
+                month=payment.month,
+                is_paid=payment.is_paid,
+                paid_amount=payment.paid_amount,
+            )
+
         return JsonResponse(
             {
                 "message": "To'lov yangilandi!",
@@ -3015,6 +3173,20 @@ def update_payment_amount(request, payment_id):
             except Exception:
                 logging.getLogger(__name__).exception("payment ontime coin xatosi")
 
+        log_action(
+            request,
+            "payment.update",
+            f"{payment.student} — {payment.month}: summa "
+            f"{payment.amount_due:,} so'm, to'langan "
+            f"{payment.paid_amount:,} so'm".replace(",", " "),
+            target_type="payment",
+            target_id=payment.id,
+            target_name=str(payment.student),
+            month=payment.month,
+            amount_due=payment.amount_due,
+            paid_amount=payment.paid_amount,
+        )
+
         wallet = compute_wallet(payment.student) if payment.student_id else {}
         return JsonResponse(
             {
@@ -3066,6 +3238,14 @@ def update_payment_settings(request):
         if "note" in data:
             s.note = str(data["note"]).strip()[:255]
         s.save()
+        log_action(
+            request,
+            "payment.settings",
+            f"To'lov kartasi o'zgartirildi: {s.card_number} ({s.card_holder})",
+            target_type="settings",
+            target_name="To'lov kartasi",
+            card_holder=s.card_holder,
+        )
         return JsonResponse(
             {
                 "message": "Karta saqlandi",
@@ -3248,6 +3428,18 @@ def accept_payment_request(request, req_id):
         pr.resolved_at = timezone.now()
         pr.save()
 
+        log_action(
+            request,
+            "payment.request_accept",
+            f"{pr.student} — {month} uchun "
+            f"{amount:,} so'm chek qabul qilindi".replace(",", " "),
+            target_type="payment_request",
+            target_id=pr.id,
+            target_name=str(pr.student),
+            month=month,
+            amount=amount,
+        )
+
         wallet = compute_wallet(student)
         return JsonResponse(
             {
@@ -3281,6 +3473,16 @@ def reject_payment_request(request, req_id):
         pr.receipt_b64 = ""
         pr.resolved_at = timezone.now()
         pr.save()
+        log_action(
+            request,
+            "payment.request_reject",
+            f"{pr.student} yuborgan chek rad etildi"
+            + (f" — {pr.note}" if pr.note else ""),
+            target_type="payment_request",
+            target_id=pr.id,
+            target_name=str(pr.student),
+            note=pr.note,
+        )
         return JsonResponse({"message": "So'rov rad etildi", "status": pr.status})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
@@ -3475,6 +3677,19 @@ def create_group(request):
             if validated_students:
                 group.students.set(validated_students)
 
+        log_action(
+            request,
+            "group.create",
+            f"«{name}» guruhi yaratildi"
+            + (f" — ustoz {group.teacher.name}" if group.teacher else "")
+            + (f", {len(validated_students)} o'quvchi" if validated_students else ""),
+            target_type="group",
+            target_id=group.id,
+            target_name=name,
+            teacher=group.teacher.name if group.teacher else None,
+            students=len(validated_students) if validated_students else 0,
+        )
+
         serializer = GroupSerializer(group)
         return JsonResponse(
             {"message": f"'{name}' guruh muvaffaqiyatli yaratildi", **serializer.data},
@@ -3550,6 +3765,17 @@ def update_group(request, group_id):
                     {"error": f"Invalid student IDs: {str(e)}"}, status=400
                 )
 
+        log_action(
+            request,
+            "group.update",
+            f"«{group.name}» guruhi tahrirlandi: "
+            + (", ".join(sorted(data.keys())) or "o'zgarishsiz"),
+            target_type="group",
+            target_id=group.id,
+            target_name=group.name,
+            fields=sorted(data.keys()),
+        )
+
         serializer = GroupSerializer(group)
         return JsonResponse(serializer.data, safe=False)
 
@@ -3584,7 +3810,22 @@ def delete_group(request, group_id):
                     s.delete()
                     deleted_students += 1
 
+        group_name = group.name
         group.delete()
+        log_action(
+            request,
+            "group.delete",
+            f"«{group_name}» guruhi o'chirildi"
+            + (
+                f" — {deleted_students} ta o'quvchi ham o'chdi"
+                if deleted_students
+                else ""
+            ),
+            target_type="group",
+            target_id=group_id,
+            target_name=group_name,
+            deleted_students=deleted_students,
+        )
         return JsonResponse(
             {"message": "Guruh o'chirildi!", "deleted_students": deleted_students}
         )
@@ -3708,6 +3949,17 @@ def give_manual_coins(request):
             reason,
             given_by=teacher,
             note=data.get("note", "").strip(),
+        )
+
+        log_action(
+            request,
+            "coins.give",
+            f"{student}ga {amount:+d} coin ({reason}) — balans {new_balance}",
+            target_type="student",
+            target_id=student.id,
+            target_name=str(student),
+            amount=amount,
+            reason=reason,
         )
 
         return JsonResponse(
@@ -4078,6 +4330,18 @@ def resolve_order(request, order_id):
             order.resolved_at = datetime.now()
             order.save()
 
+        log_action(
+            request,
+            "order.resolve",
+            f"{order.student} — «{order.product_name}» buyurtmasi "
+            + ("berildi" if new_status == "approved" else "bekor qilindi"),
+            target_type="order",
+            target_id=order.id,
+            target_name=order.product_name,
+            status=new_status,
+            price_coins=order.price_coins,
+        )
+
         return JsonResponse(
             {
                 "message": f"Buyurtma {new_status} qilindi!",
@@ -4146,6 +4410,16 @@ def create_course(request):
             name=name,
             monthly_fee=monthly_fee,
         )
+        log_action(
+            request,
+            "course.create",
+            f"«{name}» kursi yaratildi — "
+            f"oylik {monthly_fee:,} so'm".replace(",", " "),
+            target_type="course",
+            target_id=course.id,
+            target_name=name,
+            monthly_fee=monthly_fee,
+        )
 
         serializer = CourseSerializer(course)
         return JsonResponse(serializer.data, status=201)
@@ -4173,6 +4447,8 @@ def update_course(request, course_id):
         if not course:
             return JsonResponse({"error": "Kurs topilmadi"}, status=404)
 
+        fee_before = course.monthly_fee
+
         if "name" in data:
             course.name = data["name"].strip()
         if "monthly_fee" in data:
@@ -4184,6 +4460,24 @@ def update_course(request, course_id):
                 )
 
         course.save()
+
+        # Narx o'zgarishi butun markazga ta'sir qiladi — alohida ko'rsatamiz
+        if course.monthly_fee != fee_before:
+            detail = (
+                f"narx {fee_before:,} → {course.monthly_fee:,} so'm".replace(",", " ")
+            )
+        else:
+            detail = "ma'lumoti tahrirlandi"
+        log_action(
+            request,
+            "course.update",
+            f"«{course.name}» kursi: {detail}",
+            target_type="course",
+            target_id=course.id,
+            target_name=course.name,
+            before=fee_before,
+            after=course.monthly_fee,
+        )
 
         serializer = CourseSerializer(course)
         return JsonResponse(serializer.data, safe=False)
@@ -4210,7 +4504,16 @@ def delete_course(request, course_id):
         if not course:
             return JsonResponse({"error": "Kurs topilmadi"}, status=404)
 
+        course_name = course.name
         course.delete()
+        log_action(
+            request,
+            "course.delete",
+            f"«{course_name}» kursi o'chirildi",
+            target_type="course",
+            target_id=course_id,
+            target_name=course_name,
+        )
         return JsonResponse({"message": "Kurs o'chirildi!"})
     except Exception as e:
         if "PROTECT" in str(e) or "protect" in str(e).lower():
@@ -4381,6 +4684,16 @@ def create_news(request):
             created_by=student,
         )
 
+        log_action(
+            request,
+            "news.create",
+            f"«{news.title}» yangiligi joylandi ({news.get_priority_display()})",
+            target_type="news",
+            target_id=news.id,
+            target_name=news.title,
+            priority=news.priority,
+        )
+
         return JsonResponse(
             {
                 "id": news.id,
@@ -4459,6 +4772,17 @@ def update_news(request, news_id):
 
         news.save()
 
+        log_action(
+            request,
+            "news.update",
+            f"«{news.title}» yangiligi tahrirlandi"
+            + ("" if news.is_active else " (yashirildi)"),
+            target_type="news",
+            target_id=news.id,
+            target_name=news.title,
+            is_active=news.is_active,
+        )
+
         return JsonResponse(
             {
                 "message": "Yangilik yangilandi!",
@@ -4488,7 +4812,16 @@ def delete_news(request, news_id):
         if not news:
             return JsonResponse({"error": "Yangilik topilmadi"}, status=404)
 
+        news_title = news.title
         news.delete()
+        log_action(
+            request,
+            "news.delete",
+            f"«{news_title}» yangiligi o'chirildi",
+            target_type="news",
+            target_id=news_id,
+            target_name=news_title,
+        )
         return JsonResponse({"message": "Yangilik o'chirildi!"})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
@@ -4585,6 +4918,19 @@ def create_expense(request):
             date=expense_date,
             note=data.get("note", "").strip(),
         )
+        log_action(
+            request,
+            "expense.create",
+            f"Xarajat: {expense.title} — "
+            f"{expense.amount:,} so'm ({expense.get_category_display()})".replace(
+                ",", " "
+            ),
+            target_type="expense",
+            target_id=expense.id,
+            target_name=expense.title,
+            amount=expense.amount,
+            category=expense.category,
+        )
         return JsonResponse(
             {
                 "id": expense.id,
@@ -4678,7 +5024,17 @@ def delete_expense(request, expense_id):
         expense = Expense.objects.filter(id=expense_id).first()
         if not expense:
             return JsonResponse({"error": "Xarajat topilmadi"}, status=404)
+        title, amount = expense.title, expense.amount
         expense.delete()
+        log_action(
+            request,
+            "expense.delete",
+            f"Xarajat o'chirildi: {title} — {amount:,} so'm".replace(",", " "),
+            target_type="expense",
+            target_id=expense_id,
+            target_name=title,
+            amount=amount,
+        )
         return JsonResponse({"message": "Xarajat o'chirildi!"})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
@@ -4972,6 +5328,15 @@ def send_message_student(request):
         if not student:
             return JsonResponse({"error": "O'quvchi topilmadi"}, status=404)
         result = _do_send([student], text, "single", data.get("month", ""))
+        log_action(
+            request,
+            "message.send",
+            f"{student}ga telegram xabar: {text[:80]}",
+            target_type="student",
+            target_id=student.id,
+            target_name=str(student),
+            kind="single",
+        )
         return JsonResponse(result)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
@@ -4995,6 +5360,17 @@ def send_message_group(request):
         result = _do_send(students, text, "group", data.get("month", ""))
         result["group"] = group.name
         result["total"] = students.count()
+        log_action(
+            request,
+            "message.send",
+            f"«{group.name}» guruhiga ({result['total']} o'quvchi) "
+            f"telegram xabar: {text[:60]}",
+            target_type="group",
+            target_id=group.id,
+            target_name=group.name,
+            kind="group",
+            total=result["total"],
+        )
         return JsonResponse(result)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
@@ -5090,6 +5466,16 @@ def send_message_all(request):
         )
         result = _do_send(students, text, "all", data.get("month", ""))
         result["total"] = students.count()
+        log_action(
+            request,
+            "message.send",
+            f"Barcha o'quvchilarga ({result['total']} ta) telegram xabar: "
+            f"{text[:60]}",
+            target_type="broadcast",
+            target_name="Barcha o'quvchilar",
+            kind="all",
+            total=result["total"],
+        )
         return JsonResponse(result)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
@@ -5124,6 +5510,16 @@ def send_message_students(request):
         )
         result = _do_send(students, text, "group", data.get("month", ""))
         result["total"] = students.count()
+        log_action(
+            request,
+            "message.send",
+            f"Tanlangan {result['total']} o'quvchiga telegram xabar: "
+            f"{text[:60]}",
+            target_type="broadcast",
+            target_name="Tanlangan o'quvchilar",
+            kind="selected",
+            total=result["total"],
+        )
         return JsonResponse(result)
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
@@ -5171,7 +5567,17 @@ def delete_student(request, student_id):
         if not student:
             return JsonResponse({"error": "O'quvchi topilmadi"}, status=404)
         name = f"{student.name} {student.surname}".strip()
+        teacher_name = student.teacher.name if student.teacher else ""
         student.delete()
+        log_action(
+            request,
+            "student.delete",
+            f"{name} butunlay o'chirildi"
+            + (f" (ustoz: {teacher_name})" if teacher_name else ""),
+            target_type="student",
+            target_id=student_id,
+            target_name=name,
+        )
         return JsonResponse({"success": True, "deleted": name})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)

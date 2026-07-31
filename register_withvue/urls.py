@@ -1,5 +1,6 @@
 from django.urls import path
 from . import views
+from . import super_views
 from .views import (
     get_news,
     get_active_news,
@@ -18,6 +19,25 @@ urlpatterns = [
     path("managers/", views.get_managers),
     path("manager/<int:manager_id>/update/", views.update_manager),
     path("manager/<int:manager_id>/delete/", views.delete_manager),
+    # ───────────────────────────────
+    # SUPERMENEJER (faqat is_super)
+    # ───────────────────────────────
+    path("super/permissions/", super_views.get_permission_catalog),
+    path("super/managers/", super_views.get_super_managers),
+    path("super/managers/create/", super_views.create_super_managed_manager),
+    path(
+        "super/managers/<int:manager_id>/permissions/",
+        super_views.update_manager_permissions,
+    ),
+    path("super/devices/", super_views.get_devices),
+    path("super/devices/<int:device_pk>/block/", super_views.set_device_blocked),
+    path("super/salaries/", super_views.get_salaries),
+    path("super/salaries/<int:teacher_id>/rate/", super_views.update_salary_rate),
+    path("super/salaries/<int:teacher_id>/amount/", super_views.set_salary_amount),
+    path("super/salaries/<int:teacher_id>/pay/", super_views.pay_salary),
+    path("super/salaries/<int:teacher_id>/unpay/", super_views.unpay_salary),
+    path("super/salaries/<int:teacher_id>/advance/", super_views.create_advance),
+    path("super/advances/<int:advance_id>/delete/", super_views.delete_advance),
     # ───────────────────────────────
     # TEACHERS
     # ───────────────────────────────

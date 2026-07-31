@@ -15,7 +15,7 @@ import re
 from django.http import JsonResponse
 from django.utils import timezone
 
-from .models import LoginDevice, Manager
+from .models import ActivityLog, LoginDevice, Manager
 
 MIN_PHONE_KEY_LEN = 7
 
@@ -205,6 +205,175 @@ def is_device_blocked(request, phone):
     return LoginDevice.objects.filter(
         device_id=did, phone=phone, is_blocked=True
     ).exists()
+
+
+# ─────────────────────────────────────────
+# HARAKATLAR JURNALI
+# ─────────────────────────────────────────
+#
+# Kalit → o'zbekcha nom. Frontend filtrida shu ro'yxat ko'rsatiladi.
+
+ACTIONS = {
+    "payment.confirm": "To'lov tasdiqlandi",
+    "payment.update": "To'lov summasi o'zgartirildi",
+    "payment.discount": "Chegirma berildi",
+    "payment.generate": "Oylik to'lovlar yaratildi",
+    "payment.request_accept": "To'lov so'rovi qabul qilindi",
+    "payment.request_reject": "To'lov so'rovi rad etildi",
+    "payment.settings": "To'lov kartasi o'zgartirildi",
+    "student.create": "O'quvchi qo'shildi",
+    "student.update": "O'quvchi tahrirlandi",
+    "student.delete": "O'quvchi o'chirildi",
+    "student.transfer": "O'quvchi ko'chirildi",
+    "teacher.create": "Ustoz qo'shildi",
+    "teacher.update": "Ustoz tahrirlandi",
+    "teacher.delete": "Ustoz o'chirildi",
+    "group.create": "Guruh yaratildi",
+    "group.update": "Guruh tahrirlandi",
+    "group.delete": "Guruh o'chirildi",
+    "course.create": "Kurs yaratildi",
+    "course.update": "Kurs tahrirlandi",
+    "course.delete": "Kurs o'chirildi",
+    "attendance.update": "Davomat belgilandi",
+    "coins.give": "Coin berildi",
+    "message.send": "Telegram xabar yuborildi",
+    "news.create": "Yangilik joylandi",
+    "news.update": "Yangilik tahrirlandi",
+    "news.delete": "Yangilik o'chirildi",
+    "order.resolve": "Buyurtma hal qilindi",
+    "expense.create": "Xarajat qo'shildi",
+    "expense.delete": "Xarajat o'chirildi",
+    "manager.create": "Menejer yaratildi",
+    "manager.update": "Menejer tahrirlandi",
+    "manager.delete": "Menejer o'chirildi",
+    "manager.permissions": "Vakolatlar o'zgartirildi",
+    "manager.password": "Menejer paroli almashtirildi",
+    "salary.pay": "Ustoz oyligi to'landi",
+    "salary.unpay": "Oylik to'lovi bekor qilindi",
+    "salary.advance": "Ustozga avans berildi",
+    "device.block": "Qurilma bloklandi",
+}
+
+
+def action_catalog():
+    return [{"key": key, "label": label} for key, label in ACTIONS.items()]
+
+
+def describe_caller(request):
+    """Chaqiruvchi kimligini aniqlaydi: (ism, rol, manager|None).
+
+    Menejer bo'lmasa Teacher/Student jadvallaridan qidiriladi. Topilmasa
+    telefon raqamning o'zi ism o'rnida ishlatiladi — jurnal baribir
+    kimdir nimadir qilganini ko'rsatishi kerak.
+    """
+    manager = caller_manager(request)
+    if manager:
+        role = "super" if manager.is_super else "manager"
+        return (f"{manager.name} {manager.surname}".strip(), role, manager)
+
+    phone = caller_phone(request)
+    if not phone:
+        return ("", "", None)
+
+    # Aylanma import bo'lmasligi uchun shu yerda
+    from .models import Student, Teacher
+
+    target = phone_key(phone)
+    if len(target) >= MIN_PHONE_KEY_LEN:
+        for t in Teacher.objects.only("id", "name", "phone"):
+            if phone_key(t.phone) == target:
+                return (t.name, "teacher", None)
+        for s in Student.objects.only("id", "name", "surname", "phone", "is_admin"):
+            if phone_key(s.phone) == target:
+                role = "teacher" if s.is_admin else "student"
+                return (f"{s.name} {s.surname}".strip(), role, None)
+    return (phone, "", None)
+
+
+def log_action(
+    request,
+    action,
+    description,
+    *,
+    target_type="",
+    target_id=None,
+    target_name="",
+    **meta,
+):
+    """Amalni jurnalga yozadi.
+
+    ⚠️ Hech qachon xato otmaydi — jurnal yozilmagani uchun asosiy amal
+    buzilib qolmasligi kerak.
+    """
+    try:
+        name, role, manager = describe_caller(request)
+        ActivityLog.objects.create(
+            actor_phone=caller_phone(request)[:20],
+            actor_name=name[:200],
+            actor_role=role,
+            manager=manager,
+            action=action[:50],
+            description=str(description)[:300],
+            target_type=str(target_type)[:30],
+            target_id=target_id,
+            target_name=str(target_name)[:200],
+            meta=meta or {},
+            ip=client_ip(request),
+        )
+    except Exception:  # noqa: BLE001 — jurnal asosiy amalni to'smasin
+        import logging
+
+        logging.exception("ActivityLog yozilmadi: %s", action)
+
+
+def log_attendance(request, *, lesson_id, group_name, date_label):
+    """Davomat belgilashni jurnalga yozadi — dars bo'yicha bitta yozuv.
+
+    Davomat har o'quvchi uchun alohida so'rov bilan belgilanadi. Har
+    bosishni alohida yozsak, jurnal 100+ bir xil qatordan iborat bo'lib
+    qolardi. Shuning uchun bitta dars uchun bitta yozuv ochiladi va
+    keyingi belgilashlar o'sha yozuvning hisoblagichini oshiradi.
+    """
+    try:
+        name, role, manager = describe_caller(request)
+        phone = caller_phone(request)[:20]
+
+        existing = ActivityLog.objects.filter(
+            action="attendance.update",
+            target_type="lesson",
+            target_id=lesson_id,
+            actor_phone=phone,
+        ).first()
+
+        if existing:
+            count = int(existing.meta.get("count", 1)) + 1
+            existing.meta = {**existing.meta, "count": count}
+            existing.description = (
+                f"«{group_name}» — {date_label} davomati belgilandi "
+                f"({count} o'quvchi)"
+            )
+            existing.save(update_fields=["meta", "description"])
+            return
+
+        ActivityLog.objects.create(
+            actor_phone=phone,
+            actor_name=name[:200],
+            actor_role=role,
+            manager=manager,
+            action="attendance.update",
+            description=(
+                f"«{group_name}» — {date_label} davomati belgilandi (1 o'quvchi)"
+            ),
+            target_type="lesson",
+            target_id=lesson_id,
+            target_name=group_name[:200],
+            meta={"count": 1},
+            ip=client_ip(request),
+        )
+    except Exception:  # noqa: BLE001
+        import logging
+
+        logging.exception("Davomat jurnaliga yozilmadi")
 
 
 def record_login(request, *, phone, role, user_name="", manager=None):

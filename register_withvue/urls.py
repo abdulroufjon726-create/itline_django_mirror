@@ -22,12 +22,19 @@ urlpatterns = [
     # ───────────────────────────────
     # SUPERMENEJER (faqat is_super)
     # ───────────────────────────────
+    path("super/overview/", super_views.get_overview),
+    path("super/activity/", super_views.get_activity),
+    path("super/activity/summary/", super_views.get_activity_summary),
     path("super/permissions/", super_views.get_permission_catalog),
     path("super/managers/", super_views.get_super_managers),
     path("super/managers/create/", super_views.create_super_managed_manager),
     path(
         "super/managers/<int:manager_id>/permissions/",
         super_views.update_manager_permissions,
+    ),
+    path(
+        "super/managers/<int:manager_id>/password/",
+        super_views.set_manager_password,
     ),
     path("super/devices/", super_views.get_devices),
     path("super/devices/<int:device_pk>/block/", super_views.set_device_blocked),

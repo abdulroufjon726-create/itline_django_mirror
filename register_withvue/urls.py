@@ -160,6 +160,7 @@ urlpatterns = [
     path("coins/transaction/<int:txn_id>/delete/", views.delete_coin_transaction),
     # Reytingi
     path("leaderboard/", views.get_leaderboard),
+    path("leaderboard/groups/", views.get_group_leaderboard),
     # ───────────────────────────────
     # PRODUCTS (DO'KON)
     # ───────────────────────────────
@@ -214,6 +215,8 @@ urlpatterns = [
     path("messages/send-group/", views.send_message_group),
     path("messages/send-all/", views.send_message_all),
     path("messages/send-students/", views.send_message_students),
+    path("messages/send-leads/", views.send_message_leads),
+    path("messages/send-teachers/", views.send_message_teachers),
     path("lessons/send-reminders/", views.send_lesson_reminders),
     path("messages/history/", views.get_message_history),
     # ───────────────────────────────

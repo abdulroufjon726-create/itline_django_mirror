@@ -3291,6 +3291,21 @@ def create_payment_request(request):
             receipt_b64=receipt,
             note=str(data.get("note") or "").strip()[:255],
         )
+
+        # Menejerga darhol bildiramiz — chek panelda ko'rilmay yotib
+        # qolmasin. Yuborish fon oqimida, javob kutilmaydi.
+        try:
+            from . import telegram as tg
+
+            pending = PaymentRequest.objects.filter(status="pending").count()
+            tg.notify_managers(
+                f"🧾 <b>Yangi to'lov cheki</b>\n\n"
+                f"{student.name} {student.surname} chek yubordi.\n"
+                f"Kutayotgan so'rovlar: {pending} ta"
+            )
+        except Exception:  # noqa: BLE001 — bildirishnoma chekni to'smasin
+            logging.getLogger(__name__).exception("Menejer bildirishnomasi ketmadi")
+
         return JsonResponse(
             {"message": "To'lov so'rovi yuborildi", "id": pr.id, "status": pr.status},
             status=201,
@@ -3980,6 +3995,117 @@ def give_manual_coins(request):
         return JsonResponse({"error": str(e)}, status=400)
 
 
+def get_group_leaderboard(request):
+    """Guruhlar reytingi — a'zolarining o'rtacha coini bo'yicha.
+
+    O'rtacha, jami emas: aks holda 20 kishilik guruh 5 kishilikni
+    doim ortda qoldirardi va kichik guruhlar umuman raqobatlasha
+    olmasdi. `?limit=` bilan faqat yuqori N tasi olinadi (jadval
+    ekranida 5 talik chiqadi).
+    """
+    try:
+        try:
+            limit = min(50, max(1, int(request.GET.get("limit") or 10)))
+        except ValueError:
+            limit = 10
+
+        rows = []
+        groups = Group.objects.select_related("teacher").prefetch_related("students")
+        for g in groups:
+            # Ustozlarning admin profillari o'rtachani buzmasligi kerak
+            members = [
+                s for s in g.students.all() if not (s.is_admin or s.is_excellence)
+            ]
+            if not members:
+                continue
+            total = sum(s.coin_balance or 0 for s in members)
+            rows.append(
+                {
+                    "group_id": g.id,
+                    "name": g.name,
+                    "teacher_name": g.teacher.name if g.teacher else "",
+                    "students_count": len(members),
+                    "total_coins": total,
+                    "average_coins": round(total / len(members), 1),
+                }
+            )
+
+        rows.sort(key=lambda r: r["average_coins"], reverse=True)
+        for i, r in enumerate(rows[:limit], start=1):
+            r["rank"] = i
+
+        return JsonResponse(rows[:limit], safe=False)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+def send_message_leads(request):
+    """Botga ulangan leadlarga reklama xabari. Body: {text}"""
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_permission(request, "messages.send")
+    if denied:
+        return denied
+    try:
+        data = json.loads(request.body)
+        text = (data.get("text") or "").strip()
+        if not text:
+            return JsonResponse({"error": "text majburiy"}, status=400)
+
+        from . import telegram as tg
+
+        sent, failed = tg.send_to_leads(text)
+        log_action(
+            request,
+            "message.leads",
+            f"{sent} ta leadga reklama xabari: {text[:60]}",
+            target_type="broadcast",
+            target_name="Leadlar",
+            sent=sent,
+            failed=failed,
+        )
+        return JsonResponse({"sent": sent, "failed": failed})
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+def send_message_teachers(request):
+    """Ustozlarga xabar. Body: {text, teacher_ids?}"""
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_permission(request, "messages.send")
+    if denied:
+        return denied
+    try:
+        data = json.loads(request.body)
+        text = (data.get("text") or "").strip()
+        if not text:
+            return JsonResponse({"error": "text majburiy"}, status=400)
+
+        ids = data.get("teacher_ids")
+        from . import telegram as tg
+
+        sent, failed = tg.send_to_teachers(text, ids)
+        log_action(
+            request,
+            "message.teachers",
+            f"{sent} ta ustozga xabar: {text[:60]}",
+            target_type="broadcast",
+            target_name="Ustozlar",
+            sent=sent,
+            failed=failed,
+        )
+        return JsonResponse({"sent": sent, "failed": failed})
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
 def get_leaderboard(request):
     """Eng ko'p coin to'plagan o'quvchilar reytingi."""
     try:
@@ -4084,8 +4210,36 @@ def create_product(request):
             is_active=data.get("is_active", True),
             stock=data.get("stock"),
         )
+
+        log_action(
+            request,
+            "shop.product",
+            f"«{product.name}» mahsuloti qo'shildi — {product.price_coins} coin",
+            target_type="product",
+            target_id=product.id,
+            target_name=product.name,
+        )
+
+        # Botga ulangan o'quvchilarga e'lon qilamiz. Faol bo'lmagan
+        # mahsulot do'konda ko'rinmaydi — u haqda xabar ham bermaymiz.
+        # `notify: false` yuborilsa jim qo'shiladi.
+        notified = False
+        if product.is_active and data.get("notify", True):
+            try:
+                from . import telegram as tg
+
+                tg.broadcast_product(product)
+                notified = True
+            except Exception:  # noqa: BLE001 — e'lon mahsulotni to'smasin
+                logging.getLogger(__name__).exception("Mahsulot e'loni ketmadi")
+
         return JsonResponse(
-            {"id": product.id, "message": "Mahsulot qo'shildi!"}, status=201
+            {
+                "id": product.id,
+                "message": "Mahsulot qo'shildi!",
+                "notified": notified,
+            },
+            status=201,
         )
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)

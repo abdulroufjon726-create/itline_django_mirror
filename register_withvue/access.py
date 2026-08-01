@@ -256,6 +256,9 @@ ACTIONS = {
     "faceid.device": "Yuz tanish terminali o'zgartirildi",
     "faceid.link": "O'quvchi terminalga bog'landi",
     "faceid.push": "O'quvchi terminalga yuborildi",
+    "shop.product": "Mahsulot qo'shildi",
+    "message.leads": "Leadlarga reklama yuborildi",
+    "message.teachers": "Ustozlarga xabar yuborildi",
 }
 
 

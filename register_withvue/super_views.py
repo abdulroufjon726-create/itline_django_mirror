@@ -7,7 +7,8 @@ qurilmalar ro'yxati.
 """
 
 import json
-from datetime import timedelta
+from datetime import date, timedelta
+from uuid import uuid4
 
 from django.db import models as db_models, transaction
 from django.http import JsonResponse
@@ -29,6 +30,8 @@ from .access import (
 from .models import (
     ActivityLog,
     Expense,
+    FaceDevice,
+    FaceEvent,
     LoginDevice,
     Manager,
     Student,
@@ -308,6 +311,325 @@ def set_device_blocked(request, device_pk):
 
 
 # ─────────────────────────────────────────
+# YUZ TANISH TERMINALI
+# ─────────────────────────────────────────
+
+
+@csrf_exempt
+def faceid_event(request, secret):
+    """Terminal shu manzilga hodisa yuboradi ("HTTP listening").
+
+    Terminal qo'shimcha sarlavha yubora olmaydi, shuning uchun
+    autentifikatsiya URL ichidagi maxfiy kalit orqali. Kalit
+    supermenejer panelida har terminal uchun alohida beriladi.
+
+    ⚠️ Terminalga har doim 200 qaytariladi: xato kod qaytarsak u
+    hodisani qayta-qayta yuboraveradi va navbat to'lib qoladi.
+    """
+    from . import faceid
+
+    if request.method not in ("POST", "PUT"):
+        return JsonResponse({"ok": True})
+
+    device = FaceDevice.objects.filter(secret=secret, is_active=True).first()
+    if not device:
+        # Bu haqiqiy xato — noto'g'ri manzil, terminal sozlanmagan
+        return JsonResponse({"error": "Noto'g'ri kalit"}, status=404)
+
+    info, error = faceid.parse_event(request)
+    if error:
+        FaceEvent.objects.create(
+            device=device,
+            person_id="",
+            status="ignored",
+            note=error[:255],
+            happened_at=timezone.now(),
+        )
+        return JsonResponse({"ok": True, "note": error})
+
+    if not faceid.is_access_granted(info):
+        return JsonResponse({"ok": True, "note": "e'tiborsiz"})
+
+    event = faceid.handle_event(device, info)
+    return JsonResponse({"ok": True, "status": event.status, "note": event.note})
+
+
+def get_face_devices(request):
+    """Terminallar ro'yxati — sozlash manzili bilan."""
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    base = request.build_absolute_uri("/").rstrip("/")
+    rows = []
+    for d in FaceDevice.objects.order_by("name"):
+        rows.append(
+            {
+                "id": d.id,
+                "name": d.name,
+                "serial": d.serial,
+                "location": d.location,
+                "is_active": d.is_active,
+                "can_push": d.can_push,
+                "host": d.host,
+                "username": d.username,
+                "last_event_at": d.last_event_at,
+                "events_today": d.events.filter(
+                    created_at__gte=timezone.now() - timedelta(days=1)
+                ).count(),
+                # Terminal sozlamasiga aynan shu manzil yoziladi
+                "webhook_url": f"{base}/api/faceid/event/{d.secret}/",
+            }
+        )
+    return JsonResponse(rows, safe=False)
+
+
+@csrf_exempt
+def save_face_device(request, device_id=None):
+    """Terminal qo'shadi yoki tahrirlaydi."""
+    if request.method not in ("POST", "PATCH"):
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    data = _body(request)
+    if data is None:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    if device_id:
+        device = FaceDevice.objects.filter(id=device_id).first()
+        if not device:
+            return JsonResponse({"error": "Terminal topilmadi"}, status=404)
+    else:
+        name = (data.get("name") or "").strip()
+        if not name:
+            return JsonResponse({"error": "Nomi kiritilishi shart"}, status=400)
+        device = FaceDevice(name=name, secret=uuid4().hex)
+
+    for field in ("name", "serial", "location", "host", "username", "password"):
+        if field in data:
+            setattr(device, field, str(data.get(field) or "").strip())
+    if "is_active" in data:
+        device.is_active = bool(data.get("is_active"))
+
+    device.save()
+    log_action(
+        request,
+        "faceid.device",
+        f"«{device.name}» yuz tanish terminali "
+        + ("tahrirlandi" if device_id else "qo'shildi"),
+        target_type="face_device",
+        target_id=device.id,
+        target_name=device.name,
+    )
+
+    base = request.build_absolute_uri("/").rstrip("/")
+    return JsonResponse(
+        {
+            "id": device.id,
+            "name": device.name,
+            "webhook_url": f"{base}/api/faceid/event/{device.secret}/",
+        },
+        status=201 if not device_id else 200,
+    )
+
+
+@csrf_exempt
+def delete_face_device(request, device_id):
+    if request.method != "DELETE":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    device = FaceDevice.objects.filter(id=device_id).first()
+    if not device:
+        return JsonResponse({"error": "Terminal topilmadi"}, status=404)
+    name = device.name
+    device.delete()
+    log_action(
+        request,
+        "faceid.device",
+        f"«{name}» terminali o'chirildi",
+        target_type="face_device",
+        target_id=device_id,
+        target_name=name,
+    )
+    return JsonResponse({"message": "Terminal o'chirildi"})
+
+
+def get_face_events(request):
+    """Terminaldan kelgan oxirgi hodisalar."""
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    qs = FaceEvent.objects.select_related("student", "device")
+    status = request.GET.get("status")
+    if status:
+        qs = qs.filter(status=status)
+
+    try:
+        limit = min(200, max(1, int(request.GET.get("limit") or 50)))
+    except ValueError:
+        limit = 50
+
+    rows = [
+        {
+            "id": e.id,
+            "person_id": e.person_id,
+            "person_name": e.person_name,
+            "student_id": e.student_id,
+            "student_name": str(e.student) if e.student else "",
+            "device": e.device.name if e.device else "",
+            "status": e.status,
+            "status_label": e.get_status_display(),
+            "note": e.note,
+            "happened_at": e.happened_at,
+        }
+        for e in qs[:limit]
+    ]
+
+    # Bog'lanmagan raqamlar — supermenejer ularni o'quvchiga biriktiradi
+    unknown = list(
+        FaceEvent.objects.filter(status="unknown")
+        .exclude(person_id="")
+        .values("person_id", "person_name")
+        .annotate(n=db_models.Count("id"))
+        .order_by("-n")[:20]
+    )
+
+    return JsonResponse({"rows": rows, "unlinked": unknown})
+
+
+@csrf_exempt
+def link_student_face(request, student_id):
+    """O'quvchiga terminaldagi raqamni biriktiradi."""
+    if request.method != "PATCH":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    data = _body(request)
+    if data is None:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    student = Student.objects.filter(id=student_id).first()
+    if not student:
+        return JsonResponse({"error": "O'quvchi topilmadi"}, status=404)
+
+    person_id = str(data.get("face_person_id") or "").strip()[:32]
+    if person_id:
+        clash = (
+            Student.objects.filter(face_person_id=person_id)
+            .exclude(id=student_id)
+            .first()
+        )
+        if clash:
+            return JsonResponse(
+                {"error": f"Bu raqam allaqachon {clash}ga biriktirilgan"}, status=400
+            )
+
+    student.face_person_id = person_id
+    student.save(update_fields=["face_person_id"])
+    log_action(
+        request,
+        "faceid.link",
+        f"{student} — terminal raqami "
+        + (f"«{person_id}» qilib belgilandi" if person_id else "olib tashlandi"),
+        target_type="student",
+        target_id=student.id,
+        target_name=str(student),
+        face_person_id=person_id,
+    )
+    return JsonResponse({"id": student.id, "face_person_id": person_id})
+
+
+@csrf_exempt
+def push_student_to_device(request, device_id, student_id):
+    """O'quvchini terminalga yuboradi (terminal manzili sozlangan bo'lsa)."""
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    from . import faceid
+
+    data = _body(request) or {}
+    device = FaceDevice.objects.filter(id=device_id).first()
+    student = Student.objects.filter(id=student_id).first()
+    if not device or not student:
+        return JsonResponse({"error": "Terminal yoki o'quvchi topilmadi"}, status=404)
+
+    ok, message = faceid.push_student(device, student, data.get("photo") or "")
+    if not ok:
+        return JsonResponse({"error": message}, status=400)
+
+    log_action(
+        request,
+        "faceid.push",
+        f"{student} «{device.name}» terminaliga yuborildi",
+        target_type="student",
+        target_id=student.id,
+        target_name=str(student),
+    )
+    return JsonResponse({"message": message})
+
+
+# ─────────────────────────────────────────
+# KIM ONLAYN
+# ─────────────────────────────────────────
+
+ONLINE_MINUTES = 5
+
+
+def get_online(request):
+    """Hozir saytdan foydalanayotganlar.
+
+    Frontend har daqiqada "ping" yuboradi va qurilmaning `last_seen`
+    yangilanadi. Shu vaqtdan {ONLINE_MINUTES} daqiqa ichida signal
+    bergan qurilma onlayn hisoblanadi.
+    """
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    since = timezone.now() - timedelta(minutes=ONLINE_MINUTES)
+    devices = LoginDevice.objects.filter(last_seen__gte=since).select_related("manager")
+
+    # Bir odam bir nechta qurilmadan kirgan bo'lishi mumkin — telefon
+    # bo'yicha birlashtiramiz
+    people = {}
+    for d in devices:
+        row = people.setdefault(
+            d.phone,
+            {
+                "phone": d.phone,
+                "name": d.user_name or d.phone,
+                "role": d.role,
+                "manager_id": d.manager_id,
+                "devices": 0,
+                "last_seen": d.last_seen,
+            },
+        )
+        row["devices"] += 1
+        if d.last_seen > row["last_seen"]:
+            row["last_seen"] = d.last_seen
+
+    rows = sorted(people.values(), key=lambda r: r["last_seen"], reverse=True)
+    return JsonResponse(
+        {
+            "minutes": ONLINE_MINUTES,
+            "count": len(rows),
+            "rows": rows,
+        }
+    )
+
+
+# ─────────────────────────────────────────
 # BOSH SAHIFA
 # ─────────────────────────────────────────
 
@@ -529,6 +851,32 @@ def get_activity_summary(request):
 
 def _current_month():
     return timezone.localdate().strftime("%Y-%m")
+
+
+def _expense_date_for(month):
+    """Oylik xarajati qaysi sanaga yozilishi kerak.
+
+    Iyul oyligi 5-avgustda to'lansa ham u iyulning xarajati — aks holda
+    iyul foydasi oshib ko'rinadi, avgustniki esa kamayadi va oylik
+    hisobot yolg'on chiqadi.
+
+    Shuning uchun: o'sha oy hali davom etayotgan bo'lsa — bugungi sana,
+    o'tib ketgan bo'lsa — o'sha oyning oxirgi kuni.
+    """
+    import calendar
+
+    today = timezone.localdate()
+    try:
+        year, mon = (int(x) for x in month.split("-"))
+    except (ValueError, AttributeError):
+        return today
+
+    if (year, mon) == (today.year, today.month):
+        return today
+    if (year, mon) > (today.year, today.month):
+        # Kelajakdagi oy — o'sha oyning birinchi kuni
+        return date(year, mon, 1)
+    return date(year, mon, calendar.monthrange(year, mon)[1])
 
 
 def _students_count_map():
@@ -880,7 +1228,7 @@ def pay_salary(request, teacher_id):
         title=f"Oylik — {teacher.name}",
         amount=net,
         category="salary",
-        date=timezone.localdate(),
+        date=_expense_date_for(month),
         note=f"{month} oyligi"
         + (f" (avans ayirilgan: {row['advance_total']})" if row["advance_total"] else ""),
     )
@@ -999,7 +1347,7 @@ def create_advance(request, teacher_id):
         title=f"Avans — {teacher.name}",
         amount=amount,
         category="salary",
-        date=timezone.localdate(),
+        date=_expense_date_for(month),
         note=(f"{month} oyligidan avans" + (f" · {note}" if note else "")),
     )
     advance = TeacherAdvance.objects.create(
@@ -1007,7 +1355,7 @@ def create_advance(request, teacher_id):
         month=month,
         amount=amount,
         note=note,
-        date=timezone.localdate(),
+        date=_expense_date_for(month),
         expense=expense,
     )
     log_action(

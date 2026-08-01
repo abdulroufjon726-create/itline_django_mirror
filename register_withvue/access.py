@@ -253,6 +253,9 @@ ACTIONS = {
     "salary.advance": "Ustozga avans berildi",
     "salary.settings": "Oylik sozlamasi o'zgartirildi",
     "device.block": "Qurilma bloklandi",
+    "faceid.device": "Yuz tanish terminali o'zgartirildi",
+    "faceid.link": "O'quvchi terminalga bog'landi",
+    "faceid.push": "O'quvchi terminalga yuborildi",
 }
 
 
@@ -375,6 +378,23 @@ def log_attendance(request, *, lesson_id, group_name, date_label):
         import logging
 
         logging.exception("Davomat jurnaliga yozilmadi")
+
+
+def touch_presence(request):
+    """Foydalanuvchi hali saytda ekanini belgilaydi.
+
+    Frontend vaqti-vaqti bilan chaqiradi. Yangi yozuv yaratmaydi —
+    faqat login paytida yaratilgan qurilmaning `last_seen` vaqtini
+    surib qo'yadi. Shu sababli "onlayn" ro'yxatiga faqat haqiqatan
+    kirgan odamlar tushadi.
+    """
+    did, phone = device_id(request), caller_phone(request)
+    if not did or not phone:
+        return False
+    updated = LoginDevice.objects.filter(
+        device_id=did, phone=phone, is_blocked=False
+    ).update(last_seen=timezone.now())
+    return bool(updated)
 
 
 def record_login(request, *, phone, role, user_name="", manager=None):

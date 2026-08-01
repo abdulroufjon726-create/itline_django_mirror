@@ -263,6 +263,7 @@ ACTIONS = {
     "message.leads": "Leadlarga reklama yuborildi",
     "message.teachers": "Ustozlarga xabar yuborildi",
     "receipt.settings": "Chek matni o'zgartirildi",
+    "lead.delete": "Lead o'chirildi",
 }
 
 

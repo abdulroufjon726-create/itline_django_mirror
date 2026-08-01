@@ -204,6 +204,7 @@ urlpatterns = [
     # LEADS / REKLAMA (import qilingan baza)
     # ───────────────────────────────
     path("leads/", views.get_leads),
+    path("leads/<int:lead_id>/delete/", views.delete_lead),
     path("ad-channels/", views.get_ad_channels),
     path("graduates/", views.get_graduates),
     # ───────────────────────────────

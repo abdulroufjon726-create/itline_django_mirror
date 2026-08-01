@@ -22,6 +22,24 @@ urlpatterns = [
     # ───────────────────────────────
     # SUPERMENEJER (faqat is_super)
     # ───────────────────────────────
+    # Terminal shu manzilga hodisa yuboradi — kalit URL ichida,
+    # chunki Hikvision qo'shimcha sarlavha yubora olmaydi
+    path("faceid/event/<str:secret>/", super_views.faceid_event),
+    path("presence/ping/", views.presence_ping),
+    path("super/online/", super_views.get_online),
+    path("super/faceid/devices/", super_views.get_face_devices),
+    path("super/faceid/devices/create/", super_views.save_face_device),
+    path("super/faceid/devices/<int:device_id>/", super_views.save_face_device),
+    path(
+        "super/faceid/devices/<int:device_id>/delete/",
+        super_views.delete_face_device,
+    ),
+    path("super/faceid/events/", super_views.get_face_events),
+    path("super/faceid/link/<int:student_id>/", super_views.link_student_face),
+    path(
+        "super/faceid/devices/<int:device_id>/push/<int:student_id>/",
+        super_views.push_student_to_device,
+    ),
     path("super/overview/", super_views.get_overview),
     path("super/activity/", super_views.get_activity),
     path("super/activity/summary/", super_views.get_activity_summary),

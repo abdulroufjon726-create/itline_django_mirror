@@ -50,6 +50,7 @@ from .access import (
     record_login,
     require_permission,
     require_super,
+    touch_presence,
 )
 
 # Parollar kodda saqlanmaydi — settings orqali env'dan keladi (.env / Render)
@@ -1426,6 +1427,8 @@ def get_students_overview(request):
                 "monthly_discount": s.monthly_discount,
                 "wallet_balance": wallet_map.get(s.id, {}).get("balance", 0),
                 "wallet_debt": wallet_map.get(s.id, {}).get("debt", 0),
+                # Yuz tanish terminalidagi raqami (bo'lmasa bo'sh satr)
+                "face_person_id": s.face_person_id,
             }
             for s in rows
         ]
@@ -5664,6 +5667,16 @@ def bulk_delete_students(request):
 def ping(request):
     """Server uyg'oqligini tekshirish / uyg'otish uchun engil endpoint."""
     return JsonResponse({"ok": True})
+
+
+@csrf_exempt
+def presence_ping(request):
+    """Foydalanuvchi hali saytda — qurilma vaqtini yangilaydi.
+
+    Supermenejer "kim onlayn" ro'yxatini shu signal asosida ko'radi.
+    Kirmagan yoki qurilmasi bloklangan bo'lsa hech narsa yozilmaydi.
+    """
+    return JsonResponse({"ok": touch_presence(request)})
 
 
 # ─────────────────────────────

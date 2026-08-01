@@ -5278,6 +5278,18 @@ def tg_webhook(request):
                 "tg_webhook: noto'g'ri secret token (IP=%s)",
                 request.META.get("REMOTE_ADDR"),
             )
+
+            # Kalit eskirgan bo'lsa bot abadiy jim qolmasin: webhook'ni
+            # joriy kalit bilan qayta ro'yxatdan o'tkazamiz (5 daqiqada
+            # bir martadan ko'p emas). Telegram bu update'ni qayta
+            # yuboradi va u safar o'tadi.
+            try:
+                from . import telegram as tg
+
+                tg.resync_webhook()
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).exception("resync_webhook xatosi")
+
             return HttpResponseForbidden("forbidden")
 
     try:

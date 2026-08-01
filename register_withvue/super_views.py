@@ -328,10 +328,32 @@ def faceid_event(request, secret):
     """
     from . import faceid
 
+    device = FaceDevice.objects.filter(secret=secret, is_active=True).first()
+
+    # Brauzerdan ochib ko'rish uchun: manzil to'g'rimi, terminal
+    # topildimi — sozlash paytida shu javobning o'zi yetarli
+    if request.method == "GET":
+        if not device:
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "error": "Bu kalit bo'yicha terminal topilmadi — "
+                    "manzilni panelda qaytadan nusxa oling",
+                },
+                status=404,
+            )
+        return JsonResponse(
+            {
+                "ok": True,
+                "device": device.name,
+                "message": "Manzil to'g'ri. Terminal hodisa yuborishini kutmoqda.",
+                "last_event_at": device.last_event_at,
+            }
+        )
+
     if request.method not in ("POST", "PUT"):
         return JsonResponse({"ok": True})
 
-    device = FaceDevice.objects.filter(secret=secret, is_active=True).first()
     if not device:
         # Bu haqiqiy xato — noto'g'ri manzil, terminal sozlanmagan
         return JsonResponse({"error": "Noto'g'ri kalit"}, status=404)

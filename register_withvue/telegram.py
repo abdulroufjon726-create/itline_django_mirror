@@ -46,9 +46,21 @@ CODE_TEXT = (
 
 def tg_call(method, payload, timeout=15):
     """Telegram Bot API chaqiruvi."""
-    url = API_URL.format(token=settings.TG_BOT_TOKEN, method=method)
-    resp = requests.post(url, json=payload, timeout=timeout)
-    data = resp.json()
+    token = settings.TG_BOT_TOKEN
+    if not token:
+        # Tokensiz URL '.../bot/sendMessage' bo'lib, Telegram tushunarsiz
+        # 404 qaytaradi — sababi ko'rinib tursin
+        raise RuntimeError(
+            "TG_BOT_TOKEN o'rnatilmagan — bot xabar yubora olmaydi"
+        )
+    url = API_URL.format(token=token, method=method)
+    try:
+        resp = requests.post(url, json=payload, timeout=timeout)
+        data = resp.json()
+    except requests.RequestException as e:
+        raise RuntimeError(f"Telegramga ulanib bo'lmadi: {e}") from e
+    except ValueError as e:  # JSON emas (proxy/HTML xato sahifasi)
+        raise RuntimeError("Telegram noto'g'ri javob qaytardi") from e
     if not data.get("ok"):
         raise RuntimeError(data.get("description", "Telegram API xatosi"))
     return data["result"]
@@ -155,14 +167,19 @@ def handle_update(update):
             student = find_student_by_phone(phone)
             # Bazada yo'q bo'lsa ham saqlaymiz — yangi o'quvchi qo'shilganda
             # tasdiqlash kodi shu chat'ga yuboriladi va avtomatik bog'lanadi
-            TelegramSubscriber.objects.update_or_create(
-                chat_id=chat_id,
-                defaults={
-                    "student": student,
-                    "phone": last9(phone),
-                    "tg_name": tg_name[:200],
-                },
+            defaults = {"phone": last9(phone), "tg_name": tg_name[:200]}
+            if student:
+                defaults["student"] = student
+            sub, created = TelegramSubscriber.objects.update_or_create(
+                chat_id=chat_id, defaults=defaults
             )
+            # Topilmagan raqam mavjud bog'lanishni buzmasligi kerak: ulangan
+            # o'quvchi bazada yo'q raqam yozsa, avval student=None bo'lib
+            # qolar va u boshqa xabar olmay qo'yardi.
+            if not student and sub.student_id:
+                student = sub.student
+                # Yuborilgan raqam bu o'quvchiniki emas — parolni ko'rsatmaymiz
+                verified_own = False
             if student:
                 linked_msg = LINKED_TEXT.format(
                     name=f"{student.name} {student.surname}".strip()
@@ -221,11 +238,13 @@ def send_to_students(students, text, kind, month=""):
         for s in need_phone_lookup:
             for p in (s.phone, s.phone2):
                 key = last9(p)
+                # to'plam: phone va phone2 bir xil bo'lsa o'quvchi ikki marta
+                # qo'shilib, xabar ham ikki marta ketardi
                 if key:
-                    wanted.setdefault(key, []).append(s.id)
+                    wanted.setdefault(key, set()).add(s.id)
         if wanted:
             for sub in TelegramSubscriber.objects.filter(phone__in=wanted.keys()):
-                for sid in wanted.get(sub.phone, []):
+                for sid in wanted.get(sub.phone, ()):
                     subs_by_student.setdefault(sid, []).append(sub)
 
     sent = failed = no_chat = 0

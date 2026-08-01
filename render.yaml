@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     region: oregon
-    buildCommand: pip install -r requirements.txt && python manage.py migrate && python manage.py ensure_super && python manage.py load_sheet_data && python manage.py collectstatic --noinput
+    buildCommand: pip install -r requirements.txt && python manage.py migrate && python manage.py ensure_super && python manage.py load_sheet_data && python manage.py set_webhook && python manage.py collectstatic --noinput
     startCommand: gunicorn config.wsgi:application
     envVars:
       - key: SECRET_KEY
@@ -14,6 +14,15 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: TG_BOT_TOKEN
+        sync: false
+      # Webhook shu manzil bo'yicha o'rnatiladi (set_webhook build paytida
+      # ishlaydi). Bo'sh qolsa bot update qabul qilmaydi va "jim" bo'ladi.
+      - key: PUBLIC_BASE_URL
+        sync: false
+      # Soxta webhook so'rovlarini rad etish uchun maxfiy kalit
+      - key: TG_WEBHOOK_SECRET
+        generateValue: true
+      - key: TG_BOT_USERNAME
         sync: false
       - key: ADMIN_PASSWORD
         sync: false

@@ -169,6 +169,19 @@ CORS_ALLOW_HEADERS = (*default_headers, "x-user-phone", "x-device-id")
 # ─────────────────────────────
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 
+# Bot username (@siz) — frontend'ga "botga kiring" havolasini ko'rsatish uchun.
+# Bo'sh qoldirilsa `set_webhook` buyrug'i chiqargan nomdan foydalaning.
+TG_BOT_USERNAME = os.environ.get("TG_BOT_USERNAME", "itline_test_2026bot")
+
+# Backend'ning tashqi manzili — webhook'ni ro'yxatdan o'tkazish uchun kerak.
+# Render'da: https://itline-django-9s85.onrender.com
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+
+# Webhook maxfiy kaliti. Telegram har bir so'rovda buni
+# 'X-Telegram-Bot-Api-Secret-Token' sarlavhasida qaytaradi — shu orqali
+# soxta (begona) so'rovlarni rad etamiz. Bo'sh bo'lsa tekshiruv o'chadi.
+TG_WEBHOOK_SECRET = os.environ.get("TG_WEBHOOK_SECRET", "")
+
 # ─────────────────────────────
 # ADMIN / MENEJER PANEL PAROLLARI
 # Kodda saqlanmaydi — lokalda .env, deployda Render env orqali beriladi

@@ -1,11 +1,12 @@
 import calendar
 import json
 import logging
+import secrets
 from datetime import datetime, date, timedelta
 
 from django.db import transaction
 from django.db.models import Sum, F, Count, Q
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponseForbidden
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth.hashers import make_password, check_password
 from django.db import models as db_models
@@ -5260,6 +5261,22 @@ def tg_webhook(request):
     """Telegram webhook — bot update'larini qabul qiladi."""
     if request.method != "POST":
         return JsonResponse({"ok": True})
+
+    # Faqat Telegram'dan kelgan so'rovni qabul qilamiz. Bu tekshiruvsiz
+    # istalgan kishi soxta update yuborib, o'ziga begona o'quvchining
+    # saytga kirish ma'lumotlarini yozdirib olishi mumkin edi.
+    secret = getattr(settings, "TG_WEBHOOK_SECRET", "")
+    if secret:
+        got = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if not secrets.compare_digest(got, secret):
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "tg_webhook: noto'g'ri secret token (IP=%s)",
+                request.META.get("REMOTE_ADDR"),
+            )
+            return HttpResponseForbidden("forbidden")
+
     try:
         from . import telegram as tg
 
@@ -5283,7 +5300,16 @@ def tg_status(request):
             .values_list("student_id", flat=True)
             .distinct()
         )
-        return JsonResponse({"count": len(student_ids), "student_ids": student_ids})
+        return JsonResponse(
+            {
+                "count": len(student_ids),
+                "student_ids": student_ids,
+                # Token yo'q bo'lsa panel "ulangan" ko'rsatib turib, xabar
+                # yubormasligi mumkin edi — holat ko'rinib tursin
+                "configured": bool(settings.TG_BOT_TOKEN),
+                "bot_username": settings.TG_BOT_USERNAME,
+            }
+        )
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 
@@ -5666,14 +5692,15 @@ def send_verification_code(request):
 
         sub = TelegramSubscriber.objects.filter(phone=target).first()
         if not sub:
+            bot = settings.TG_BOT_USERNAME
             return JsonResponse(
                 {
                     "sent": False,
                     "not_linked": True,
-                    "bot_username": "itline_test_2026bot",
+                    "bot_username": bot,
                     "error": (
                         "Bu raqam botga ulanmagan. O'quvchi avval "
-                        "@itline_test_2026bot ga kirib /start bosib, "
+                        f"@{bot} ga kirib /start bosib, "
                         "telefon raqamini yuborishi kerak."
                     ),
                 },

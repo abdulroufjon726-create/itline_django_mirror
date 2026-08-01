@@ -5476,6 +5476,38 @@ def get_leads(request):
         return JsonResponse({"error": str(e)}, status=500)
 
 
+@csrf_exempt
+def delete_lead(request, lead_id):
+    """Leadni o'chiradi.
+
+    Jadvaldan import qilingan ro'yxatda takror yoki keraksiz yozuvlar
+    uchraydi. Diqqat: `load_sheet_data` qayta ishga tushsa, o'chirilgan
+    lead jadvalda qolgan bo'lsa qaytadan paydo bo'ladi.
+    """
+    if request.method != "DELETE":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    lead = Lead.objects.filter(id=lead_id).first()
+    if not lead:
+        return JsonResponse({"error": "Lead topilmadi"}, status=404)
+
+    name, phone = lead.name, lead.phone
+    lead.delete()
+    log_action(
+        request,
+        "lead.delete",
+        f"Lead o'chirildi: {name} ({phone})",
+        target_type="lead",
+        target_id=lead_id,
+        target_name=name,
+        phone=phone,
+    )
+    return JsonResponse({"message": f"{name} o'chirildi"})
+
+
 def get_ad_channels(request):
     """Telegram reklama kanallari."""
     try:

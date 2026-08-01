@@ -20,6 +20,62 @@ logger = logging.getLogger(__name__)
 
 API_URL = "https://api.telegram.org/bot{token}/{method}"
 
+WEBHOOK_PATH = "/api/tg/webhook/"
+
+# Webhook kalitini qayta o'rnatishlar orasidagi eng qisqa oraliq.
+# Telegram rad etilgan update'ni bir necha marta qayta yuboradi —
+# har biriga setWebhook chaqirmaslik uchun.
+_RESYNC_MIN_SECONDS = 300
+_last_resync = 0.0
+_resync_lock = threading.Lock()
+
+
+def resync_webhook():
+    """Webhook'ni joriy maxfiy kalit bilan qayta ro'yxatdan o'tkazadi.
+
+    Kalit mos kelmay qolsa (masalan SECRET_KEY almashgan yoki webhook
+    boshqa muhitdan o'rnatilgan bo'lsa) Telegram'dan kelgan har bir
+    update 403 bilan rad etiladi va bot butunlay jim bo'ladi. Bepul
+    planda Shell yo'q — ya'ni buni qo'lda tuzatib ham bo'lmaydi, deploy
+    kutish kerak bo'lardi.
+
+    Shuning uchun mos kelmagan kalit ko'rinishi bilan o'zimiz qayta
+    ro'yxatdan o'tkazamiz. Telegram rad etilgan update'ni qayta
+    yuboradi va u safar kalit to'g'ri keladi.
+    """
+    global _last_resync
+    import time
+
+    if not settings.TG_BOT_TOKEN or not settings.PUBLIC_BASE_URL:
+        return False
+
+    with _resync_lock:
+        now = time.monotonic()
+        if now - _last_resync < _RESYNC_MIN_SECONDS:
+            return False
+        _last_resync = now
+
+    target = settings.PUBLIC_BASE_URL.rstrip("/") + WEBHOOK_PATH
+    payload = {
+        "url": target,
+        "allowed_updates": ["message", "edited_message"],
+        "max_connections": 40,
+    }
+    if settings.TG_WEBHOOK_SECRET:
+        payload["secret_token"] = settings.TG_WEBHOOK_SECRET
+
+    try:
+        res = tg_call("setWebhook", payload)
+    except Exception:  # noqa: BLE001 — webhook javobi baribir qaytishi kerak
+        logger.exception("Webhook kalitini qayta o'rnatib bo'lmadi")
+        return False
+
+    if res.get("ok"):
+        logger.warning("Webhook kaliti qayta o'rnatildi: %s", target)
+        return True
+    logger.error("setWebhook rad etdi: %s", res.get("description"))
+    return False
+
 WELCOME_TEXT = (
     "Assalomu alaykum! 👋\n\n"
     "Bu ITLINE o'quv markazining rasmiy xabarlar boti.\n"

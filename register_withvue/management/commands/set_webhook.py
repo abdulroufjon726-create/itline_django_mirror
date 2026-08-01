@@ -123,9 +123,14 @@ class Command(BaseCommand):
 
         target = base + WEBHOOK_PATH
         info = api("getWebhookInfo").get("result", {})
-        if info.get("url") == target and not info.get("last_error_message"):
-            self.stdout.write(f"Webhook allaqachon to'g'ri: {target}")
-            return
+
+        # Manzil to'g'ri bo'lsa ham qayta o'rnatamiz. Telegram maxfiy
+        # kalitni qaytarmaydi, ya'ni u eskirganini bu yerdan bilib
+        # bo'lmaydi — eskirgan bo'lsa esa har bir update 403 bilan rad
+        # etiladi va bot butunlay jim qoladi. setWebhook idempotent va
+        # arzon, deployda bir marta chaqirilgani zarar qilmaydi.
+        if info.get("url") == target:
+            self.stdout.write(f"Manzil o'zgarmagan, kalit yangilanadi: {target}")
 
         payload = {
             "url": target,

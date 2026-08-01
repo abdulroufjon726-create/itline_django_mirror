@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     region: oregon
-    buildCommand: pip install -r requirements.txt && python manage.py migrate && python manage.py ensure_super && python manage.py load_sheet_data && python manage.py collectstatic --noinput
+    buildCommand: pip install -r requirements.txt && python manage.py migrate && python manage.py ensure_super && python manage.py load_sheet_data && python manage.py set_webhook && python manage.py collectstatic --noinput
     startCommand: gunicorn config.wsgi:application
     envVars:
       - key: SECRET_KEY
@@ -13,6 +13,11 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+      # Botning YAGONA majburiy sozlamasi. Kodda saqlanmaydi: token
+      # bot ustidan to'liq nazorat beradi — u bilan begona odam
+      # o'quvchilarga markaz nomidan xabar yuborishi mumkin.
+      # Qolganlari (PUBLIC_BASE_URL, TG_WEBHOOK_SECRET, TG_BOT_USERNAME)
+      # settings.py da standart qiymatga ega — kerak bo'lsagina qo'shiladi.
       - key: TG_BOT_TOKEN
         sync: false
       - key: ADMIN_PASSWORD

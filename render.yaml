@@ -13,16 +13,12 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+      # Botning YAGONA majburiy sozlamasi. Kodda saqlanmaydi: token
+      # bot ustidan to'liq nazorat beradi — u bilan begona odam
+      # o'quvchilarga markaz nomidan xabar yuborishi mumkin.
+      # Qolganlari (PUBLIC_BASE_URL, TG_WEBHOOK_SECRET, TG_BOT_USERNAME)
+      # settings.py da standart qiymatga ega — kerak bo'lsagina qo'shiladi.
       - key: TG_BOT_TOKEN
-        sync: false
-      # Webhook shu manzil bo'yicha o'rnatiladi (set_webhook build paytida
-      # ishlaydi). Bo'sh qolsa bot update qabul qilmaydi va "jim" bo'ladi.
-      - key: PUBLIC_BASE_URL
-        sync: false
-      # Soxta webhook so'rovlarini rad etish uchun maxfiy kalit
-      - key: TG_WEBHOOK_SECRET
-        generateValue: true
-      - key: TG_BOT_USERNAME
         sync: false
       - key: ADMIN_PASSWORD
         sync: false

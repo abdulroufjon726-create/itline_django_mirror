@@ -173,14 +173,30 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 # Bo'sh qoldirilsa `set_webhook` buyrug'i chiqargan nomdan foydalaning.
 TG_BOT_USERNAME = os.environ.get("TG_BOT_USERNAME", "itline_test_2026bot")
 
-# Backend'ning tashqi manzili — webhook'ni ro'yxatdan o'tkazish uchun kerak.
-# Render'da: https://itline-django-9s85.onrender.com
-PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+# Backend'ning tashqi manzili — webhook'ni ro'yxatdan o'tkazish uchun.
+# Bu maxfiy emas (manzil baribir hammaga ko'rinadi), shuning uchun
+# standart qiymat shu yerda turadi va env o'zgaruvchisi shart emas.
+# Boshqa domenga ko'chsangiz PUBLIC_BASE_URL orqali almashtirasiz.
+PUBLIC_BASE_URL = os.environ.get(
+    "PUBLIC_BASE_URL", "https://itline-django-9s85.onrender.com"
+).rstrip("/")
 
 # Webhook maxfiy kaliti. Telegram har bir so'rovda buni
 # 'X-Telegram-Bot-Api-Secret-Token' sarlavhasida qaytaradi — shu orqali
-# soxta (begona) so'rovlarni rad etamiz. Bo'sh bo'lsa tekshiruv o'chadi.
+# soxta (begona) so'rovlarni rad etamiz.
+#
+# Alohida env o'zgaruvchisi shart emas: berilmasa SECRET_KEY'dan
+# hosil qilinadi. SECRET_KEY allaqachon maxfiy va Render'da bor, ya'ni
+# kalit ham maxfiy bo'ladi-yu, sozlaydigan narsa kamayadi. Telegram
+# kalit uzunligini 1..256 belgi va faqat A-Z a-z 0-9 _ - deb cheklaydi,
+# shuning uchun hex ishlatamiz.
 TG_WEBHOOK_SECRET = os.environ.get("TG_WEBHOOK_SECRET", "")
+if not TG_WEBHOOK_SECRET:
+    import hashlib
+
+    TG_WEBHOOK_SECRET = hashlib.sha256(
+        f"tg-webhook:{SECRET_KEY}".encode()
+    ).hexdigest()
 
 # ─────────────────────────────
 # ADMIN / MENEJER PANEL PAROLLARI

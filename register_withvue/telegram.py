@@ -88,6 +88,22 @@ NOT_FOUND_TEXT = (
     "Iltimos, o'quv markazida ro'yxatdan o'tgan raqamingizni yuboring "
     "yoki administratorga murojaat qiling."
 )
+TEACHER_LINKED_TEXT = (
+    "✅ {name}, siz ustoz sifatida ulandingiz!\n\n"
+    "Bu yerga o'z guruhlaringiz haqidagi xabarlar keladi: dars "
+    "eslatmalari va markazdan e'lonlar."
+)
+MANAGER_LINKED_TEXT = (
+    "✅ {name}, siz menejer sifatida ulandingiz!\n\n"
+    "Panelda e'tibor talab qiladigan narsa paydo bo'lsa shu yerga "
+    "xabar keladi — masalan yangi to'lov cheki."
+)
+LEAD_LINKED_TEXT = (
+    "✅ Rahmat{name}! Raqamingiz qabul qilindi.\n\n"
+    "ITLINE o'quv markazining yangiliklari va kurslar haqidagi "
+    "e'lonlar shu yerga keladi."
+)
+
 PENDING_TEXT = (
     "✅ Raqamingiz qabul qilindi!\n\n"
     "Siz hali bazada yo'qsiz. Administrator sizni ro'yxatga qo'shayotganda "
@@ -133,6 +149,94 @@ def last9(phone):
     """Telefonning oxirgi 9 raqami (solishtirish uchun)."""
     d = re.sub(r"\D", "", str(phone or ""))
     return d[-9:] if len(d) >= 9 else ""
+
+
+def student_menu():
+    """Ulangan o'quvchiga doimiy tugmalar."""
+    return {
+        "keyboard": [[{"text": "💰 Coinlarim"}]],
+        "resize_keyboard": True,
+    }
+
+
+def handle_coin_request(chat_id):
+    """O'quvchiga coin balansi va oxirgi harakatlarni ko'rsatadi."""
+    sub = TelegramSubscriber.objects.filter(chat_id=chat_id).first()
+    student = sub.student if sub else None
+    if not student:
+        send_text(
+            chat_id,
+            "Coinlaringizni ko'rish uchun avval /start orqali "
+            "telefon raqamingizni yuboring.",
+        )
+        return
+
+    from .models import CoinTransaction
+
+    lines = [
+        f"💰 <b>{student.name} {student.surname}</b>",
+        f"Balans: <b>{student.coin_balance}</b> coin",
+    ]
+
+    recent = list(
+        CoinTransaction.objects.filter(student=student).order_by("-created_at")[:5]
+    )
+    if recent:
+        lines.append("\nOxirgi harakatlar:")
+        for t in recent:
+            sign = "+" if t.amount >= 0 else ""
+            lines.append(
+                f"  {t.created_at:%d.%m}  {sign}{t.amount}  {t.get_reason_display()}"
+            )
+    else:
+        lines.append("\nHozircha coin harakati yo'q.")
+
+    # Reytingdagi o'rni — faqat o'quvchining o'z guruhi ichida, butun
+    # markaz bo'yicha emas: bu ma'lumot unga yaqinroq va tushunarliroq
+    group = student.groups.first()
+    if group:
+        better = (
+            group.students.filter(coin_balance__gt=student.coin_balance)
+            .exclude(is_admin=True)
+            .count()
+        )
+        total = group.students.exclude(is_admin=True).count()
+        lines.append(f"\n🏆 «{group.name}» guruhida: {better + 1} / {total}")
+
+    send_text(chat_id, "\n".join(lines), reply_markup=student_menu())
+
+
+def identify_by_phone(phone):
+    """Raqam kimga tegishli — (rol, obyekt) juftligi.
+
+    Tartib muhim: bitta raqam bir nechta jadvalda uchraydi. Ustozning
+    o'quvchi profili ham bo'ladi (is_admin), menejer ham o'quvchi
+    sifatida yozilgan bo'lishi mumkin. Eng "kuchli" roldan boshlaymiz,
+    aks holda ustoz o'zini o'quvchi deb tanitib qolardi.
+    """
+    target = last9(phone)
+    if not target:
+        return ("unknown", None)
+
+    from .models import Lead, Manager, Teacher
+
+    for m in Manager.objects.filter(is_active=True).only("id", "phone", "name"):
+        if last9(m.phone) == target:
+            return ("manager", m)
+
+    for t in Teacher.objects.only("id", "phone", "name"):
+        if last9(t.phone) == target:
+            return ("teacher", t)
+
+    student = find_student_by_phone(phone)
+    if student:
+        return ("student", student)
+
+    for lead in Lead.objects.only("id", "phone", "phone2", "name"):
+        if last9(lead.phone) == target or last9(lead.phone2) == target:
+            return ("lead", lead)
+
+    return ("unknown", None)
 
 
 def find_student_by_phone(phone):
@@ -220,22 +324,39 @@ def handle_update(update):
             phone = text  # raqamni qo'lda yozgan bo'lsa ham qabul qilamiz
 
         if phone:
-            student = find_student_by_phone(phone)
+            role, who = identify_by_phone(phone)
+
             # Bazada yo'q bo'lsa ham saqlaymiz — yangi o'quvchi qo'shilganda
             # tasdiqlash kodi shu chat'ga yuboriladi va avtomatik bog'lanadi
-            defaults = {"phone": last9(phone), "tg_name": tg_name[:200]}
-            if student:
-                defaults["student"] = student
-            sub, created = TelegramSubscriber.objects.update_or_create(
+            defaults = {
+                "phone": last9(phone),
+                "tg_name": tg_name[:200],
+                "role": role,
+            }
+            if role == "student":
+                defaults["student"] = who
+            elif role == "teacher":
+                defaults["teacher"] = who
+            elif role == "manager":
+                defaults["manager"] = who
+            elif role == "lead":
+                defaults["lead"] = who
+
+            sub, _created = TelegramSubscriber.objects.update_or_create(
                 chat_id=chat_id, defaults=defaults
             )
+
             # Topilmagan raqam mavjud bog'lanishni buzmasligi kerak: ulangan
             # o'quvchi bazada yo'q raqam yozsa, avval student=None bo'lib
             # qolar va u boshqa xabar olmay qo'yardi.
+            student = who if role == "student" else None
             if not student and sub.student_id:
                 student = sub.student
+                sub.role = "student"
+                sub.save(update_fields=["role"])
                 # Yuborilgan raqam bu o'quvchiniki emas — parolni ko'rsatmaymiz
                 verified_own = False
+
             if student:
                 linked_msg = LINKED_TEXT.format(
                     name=f"{student.name} {student.surname}".strip()
@@ -248,17 +369,33 @@ def handle_update(update):
                         "'📱 Telefon raqamni yuborish' tugmasi orqali raqamingizni "
                         "yuboring."
                     )
+                send_text(chat_id, linked_msg, reply_markup=student_menu())
+            elif role == "teacher":
                 send_text(
                     chat_id,
-                    linked_msg,
+                    TEACHER_LINKED_TEXT.format(name=who.name),
+                    reply_markup={"remove_keyboard": True},
+                )
+            elif role == "manager":
+                send_text(
+                    chat_id,
+                    MANAGER_LINKED_TEXT.format(name=who.name),
+                    reply_markup={"remove_keyboard": True},
+                )
+            elif role == "lead":
+                send_text(
+                    chat_id,
+                    LEAD_LINKED_TEXT.format(name=who.name or ""),
                     reply_markup={"remove_keyboard": True},
                 )
             else:
                 send_text(
-                    chat_id,
-                    PENDING_TEXT,
-                    reply_markup={"remove_keyboard": True},
+                    chat_id, PENDING_TEXT, reply_markup={"remove_keyboard": True}
                 )
+            return
+
+        if text in ("/coin", "💰 Coinlarim", "/balans"):
+            handle_coin_request(chat_id)
             return
 
         # boshqa har qanday xabar
@@ -275,6 +412,170 @@ def _personalize(text, student, month=""):
         text.replace("{ism}", f"{student.name} {student.surname}".strip())
         .replace("{oy}", month or "")
     )
+
+
+UZ_MONTHS = [
+    "Yanvar", "Fevral", "Mart", "Aprel", "May", "Iyun",
+    "Iyul", "Avgust", "Sentabr", "Oktabr", "Noyabr", "Dekabr",
+]
+
+
+def _money(value):
+    return f"{int(value or 0):,}".replace(",", " ") + " so'm"
+
+
+def _month_label(month):
+    """'2026-07' -> 'Iyul 2026'."""
+    try:
+        year, mon = month.split("-")
+        return f"{UZ_MONTHS[int(mon) - 1]} {year}"
+    except (ValueError, IndexError, AttributeError):
+        return month or ""
+
+
+def build_receipt(payment):
+    """To'lov cheki matnini sozlamadagi shablondan tuzadi."""
+    from django.utils import timezone
+
+    from .models import ReceiptSettings
+
+    settings_obj = ReceiptSettings.get_settings()
+    student = payment.student
+    group = student.groups.first() if student else None
+
+    due = max(0, (payment.amount_due or 0) - (payment.discount or 0))
+    paid = payment.paid_amount or 0
+
+    values = {
+        "{ism}": f"{student.name} {student.surname}".strip() if student else "",
+        "{oy}": _month_label(payment.month),
+        "{summa}": _money(paid),
+        "{jami}": _money(due),
+        "{qolgan}": _money(max(0, due - paid)),
+        "{sana}": timezone.localdate().strftime("%d.%m.%Y"),
+        "{markaz}": settings_obj.center_name,
+        "{guruh}": group.name if group else "—",
+    }
+
+    text = settings_obj.template or ReceiptSettings.DEFAULT_TEMPLATE
+    for key, val in values.items():
+        text = text.replace(key, str(val))
+    return text
+
+
+def send_receipt(payment):
+    """To'lov tasdiqlangach o'quvchiga chek yuboradi.
+
+    Fon oqimida — menejer tugmani bosgach panel Telegramni kutib
+    turmasin. Chek o'chirilgan yoki o'quvchi botga ulanmagan bo'lsa
+    jim o'tib ketadi.
+    """
+    from .models import ReceiptSettings
+
+    if not ReceiptSettings.get_settings().enabled:
+        return
+    if not payment.student_id:
+        return
+
+    text = build_receipt(payment)
+    student_id = payment.student_id
+
+    def run():
+        subs = TelegramSubscriber.objects.filter(student_id=student_id)
+        for sub in subs:
+            try:
+                send_text(sub.chat_id, text)
+            except Exception:  # noqa: BLE001
+                logger.exception("Chek yuborilmadi (chat=%s)", sub.chat_id)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def send_photo(chat_id, photo_url, caption=""):
+    """Rasm yuboradi. Rasm URL bo'lishi kerak (mahsulot rasmi shunday)."""
+    payload = {"chat_id": chat_id, "photo": photo_url, "parse_mode": "HTML"}
+    if caption:
+        payload["caption"] = caption[:1024]
+    return tg_call("sendPhoto", payload)
+
+
+def notify_managers(text):
+    """Botga ulangan menejerlarga bildirishnoma.
+
+    Fon oqimida ishlaydi — panel amali (masalan chek qabul qilish)
+    Telegram sekinligi tufayli kutib qolmasin.
+    """
+
+    def run():
+        subs = TelegramSubscriber.objects.filter(role="manager").exclude(
+            manager__isnull=True
+        )
+        for sub in subs:
+            try:
+                send_text(sub.chat_id, text)
+            except Exception:  # noqa: BLE001 — biri xato bo'lsa qolgani ketaversin
+                logger.exception("Menejerga xabar yuborilmadi (chat=%s)", sub.chat_id)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def broadcast_product(product):
+    """Yangi mahsulotni botga ulangan o'quvchilarga e'lon qiladi."""
+    price = f"{product.price_coins:,}".replace(",", " ")
+    caption = (
+        f"🛍 <b>Do'konda yangi mahsulot!</b>\n\n"
+        f"<b>{product.name}</b>\n"
+        f"Narxi: <b>{price} coin</b>"
+    )
+    if product.description:
+        caption += f"\n\n{product.description[:600]}"
+
+    def run():
+        subs = TelegramSubscriber.objects.filter(role="student").exclude(
+            student__isnull=True
+        )
+        for sub in subs:
+            try:
+                if product.image:
+                    send_photo(sub.chat_id, product.image, caption)
+                else:
+                    send_text(sub.chat_id, caption)
+            except Exception:  # noqa: BLE001
+                logger.exception("Mahsulot e'loni ketmadi (chat=%s)", sub.chat_id)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def send_to_leads(text):
+    """Botga ulangan leadlarga reklama xabari. Natija: (yuborildi, xato)."""
+    sent = failed = 0
+    subs = TelegramSubscriber.objects.filter(role="lead").exclude(lead__isnull=True)
+    for sub in subs:
+        try:
+            send_text(sub.chat_id, text)
+            sent += 1
+        except Exception:  # noqa: BLE001
+            failed += 1
+            logger.exception("Leadga xabar ketmadi (chat=%s)", sub.chat_id)
+    return sent, failed
+
+
+def send_to_teachers(text, teacher_ids=None):
+    """Ustozlarga xabar. `teacher_ids` berilmasa hammasiga."""
+    sent = failed = 0
+    subs = TelegramSubscriber.objects.filter(role="teacher").exclude(
+        teacher__isnull=True
+    )
+    if teacher_ids is not None:
+        subs = subs.filter(teacher_id__in=list(teacher_ids))
+    for sub in subs:
+        try:
+            send_text(sub.chat_id, text)
+            sent += 1
+        except Exception:  # noqa: BLE001
+            failed += 1
+            logger.exception("Ustozga xabar ketmadi (chat=%s)", sub.chat_id)
+    return sent, failed
 
 
 def send_to_students(students, text, kind, month=""):

@@ -352,6 +352,66 @@ class PaymentSettings(models.Model):
         return obj
 
 
+class ReceiptSettings(models.Model):
+    """To'lov cheki matni (singleton).
+
+    Menejer to'lovni tasdiqlaganda o'quvchiga telegram orqali shu
+    matn yuboriladi. Matn panelda tahrirlanadi — markaz o'z uslubida
+    yozsin, kodga tegish shart bo'lmasin.
+
+    Matndagi {kalit}lar yuborishdan oldin haqiqiy qiymatga
+    almashtiriladi (ro'yxat `PLACEHOLDERS` da).
+    """
+
+    PLACEHOLDERS = [
+        ("{ism}", "O'quvchining ism-familiyasi"),
+        ("{oy}", "To'lov oyi (masalan: Iyul 2026)"),
+        ("{summa}", "Shu safar to'langan summa"),
+        ("{jami}", "Oylik to'lov (chegirmadan keyin)"),
+        ("{qolgan}", "Qolgan qarz"),
+        ("{sana}", "Bugungi sana"),
+        ("{markaz}", "O'quv markaz nomi"),
+        ("{guruh}", "O'quvchining guruhi"),
+    ]
+
+    DEFAULT_TEMPLATE = (
+        "🧾 <b>To'lov cheki</b>\n\n"
+        "Hurmatli {ism}!\n"
+        "{oy} oyi uchun to'lovingiz qabul qilindi.\n\n"
+        "To'langan: <b>{summa}</b>\n"
+        "Oylik to'lov: {jami}\n"
+        "Qolgan: {qolgan}\n"
+        "Sana: {sana}\n\n"
+        "Rahmat! 🙏\n"
+        "{markaz}"
+    )
+
+    enabled = models.BooleanField(
+        default=True, verbose_name="Chek yuborilsinmi"
+    )
+    template = models.TextField(
+        default=DEFAULT_TEMPLATE, verbose_name="Chek matni"
+    )
+    center_name = models.CharField(
+        max_length=100,
+        default="ITLINE o'quv markazi",
+        verbose_name="Markaz nomi",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Chek sozlamasi"
+        verbose_name_plural = "Chek sozlamalari"
+
+    def __str__(self):
+        return "Chek matni" + ("" if self.enabled else " (o'chirilgan)")
+
+    @classmethod
+    def get_settings(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
 class PaymentRequest(models.Model):
     """Student yuborgan to'lov so'rovi (chek rasmi bilan).
 
@@ -740,9 +800,27 @@ class SheetImportMeta(models.Model):
 
 
 class TelegramSubscriber(models.Model):
-    """Botga ulangan (telefonini yuborgan) foydalanuvchi."""
+    """Botga ulangan (telefonini yuborgan) foydalanuvchi.
+
+    Bot avval faqat o'quvchilarni tanigan. Endi ustoz, menejer va lead
+    ham ulanadi — har biriga o'ziga tegishli xabar boradi: ustozga o'z
+    guruhlari, menejerga panel bildirishnomalari, leadga reklama.
+
+    Bitta raqam bir nechta jadvalda uchrashi mumkin (ustozning o'quvchi
+    profili ham bo'ladi), shuning uchun rol qidiruv tartibi bo'yicha
+    aniqlanadi va `role` maydonida saqlanadi.
+    """
+
+    ROLE_CHOICES = [
+        ("student", "O'quvchi"),
+        ("teacher", "Ustoz"),
+        ("manager", "Menejer"),
+        ("lead", "Potensial mijoz"),
+        ("unknown", "Bazada topilmadi"),
+    ]
 
     chat_id = models.BigIntegerField(unique=True, verbose_name="Telegram chat ID")
+
     student = models.ForeignKey(
         Student,
         on_delete=models.SET_NULL,
@@ -751,6 +829,39 @@ class TelegramSubscriber(models.Model):
         related_name="tg_subscribers",
         verbose_name="O'quvchi",
     )
+    teacher = models.ForeignKey(
+        "Teacher",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tg_subscribers",
+        verbose_name="Ustoz",
+    )
+    manager = models.ForeignKey(
+        "Manager",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tg_subscribers",
+        verbose_name="Menejer",
+    )
+    lead = models.ForeignKey(
+        "Lead",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tg_subscribers",
+        verbose_name="Lead",
+    )
+
+    role = models.CharField(
+        max_length=10,
+        choices=ROLE_CHOICES,
+        default="unknown",
+        db_index=True,
+        verbose_name="Roli",
+    )
+
     phone = models.CharField(max_length=20, blank=True, verbose_name="Telefon")
     tg_name = models.CharField(max_length=200, blank=True, verbose_name="TG ismi")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -760,7 +871,8 @@ class TelegramSubscriber(models.Model):
         verbose_name_plural = "Telegram obunachilar"
 
     def __str__(self):
-        return f"{self.tg_name or self.chat_id} → {self.student or 'ulanmagan'}"
+        who = self.student or self.teacher or self.manager or self.lead
+        return f"{self.tg_name or self.chat_id} → {who or 'ulanmagan'}"
 
 
 class PhoneVerification(models.Model):

@@ -90,8 +90,11 @@ PERMISSIONS = [
     ("coins.settings", "Coin sozlamalarini o'zgartirish", "Do'kon"),
     ("coins.give", "Qo'lda coin berish", "Do'kon"),
     # Aloqa
-    ("messages.send", "Telegram orqali xabar yuborish", "Aloqa"),
+    ("messages.send", "O'quvchilarga telegram xabar yuborish", "Aloqa"),
+    ("messages.teachers", "Ustozlarga xabar yuborish", "Aloqa"),
+    ("messages.leads", "Leadlarga reklama yuborish", "Aloqa"),
     ("news.manage", "Yangiliklarni boshqarish", "Aloqa"),
+    ("receipt.settings", "To'lov cheki matnini sozlash", "Aloqa"),
     # Hisobot
     ("history.view", "To'lovlar tarixini ko'rish", "Hisobot"),
     ("database.view", "Baza (leadlar, bitiruvchilar) ko'rish", "Hisobot"),
@@ -259,6 +262,7 @@ ACTIONS = {
     "shop.product": "Mahsulot qo'shildi",
     "message.leads": "Leadlarga reklama yuborildi",
     "message.teachers": "Ustozlarga xabar yuborildi",
+    "receipt.settings": "Chek matni o'zgartirildi",
 }
 
 

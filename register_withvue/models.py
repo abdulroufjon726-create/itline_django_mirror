@@ -352,6 +352,66 @@ class PaymentSettings(models.Model):
         return obj
 
 
+class ReceiptSettings(models.Model):
+    """To'lov cheki matni (singleton).
+
+    Menejer to'lovni tasdiqlaganda o'quvchiga telegram orqali shu
+    matn yuboriladi. Matn panelda tahrirlanadi — markaz o'z uslubida
+    yozsin, kodga tegish shart bo'lmasin.
+
+    Matndagi {kalit}lar yuborishdan oldin haqiqiy qiymatga
+    almashtiriladi (ro'yxat `PLACEHOLDERS` da).
+    """
+
+    PLACEHOLDERS = [
+        ("{ism}", "O'quvchining ism-familiyasi"),
+        ("{oy}", "To'lov oyi (masalan: Iyul 2026)"),
+        ("{summa}", "Shu safar to'langan summa"),
+        ("{jami}", "Oylik to'lov (chegirmadan keyin)"),
+        ("{qolgan}", "Qolgan qarz"),
+        ("{sana}", "Bugungi sana"),
+        ("{markaz}", "O'quv markaz nomi"),
+        ("{guruh}", "O'quvchining guruhi"),
+    ]
+
+    DEFAULT_TEMPLATE = (
+        "🧾 <b>To'lov cheki</b>\n\n"
+        "Hurmatli {ism}!\n"
+        "{oy} oyi uchun to'lovingiz qabul qilindi.\n\n"
+        "To'langan: <b>{summa}</b>\n"
+        "Oylik to'lov: {jami}\n"
+        "Qolgan: {qolgan}\n"
+        "Sana: {sana}\n\n"
+        "Rahmat! 🙏\n"
+        "{markaz}"
+    )
+
+    enabled = models.BooleanField(
+        default=True, verbose_name="Chek yuborilsinmi"
+    )
+    template = models.TextField(
+        default=DEFAULT_TEMPLATE, verbose_name="Chek matni"
+    )
+    center_name = models.CharField(
+        max_length=100,
+        default="ITLINE o'quv markazi",
+        verbose_name="Markaz nomi",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Chek sozlamasi"
+        verbose_name_plural = "Chek sozlamalari"
+
+    def __str__(self):
+        return "Chek matni" + ("" if self.enabled else " (o'chirilgan)")
+
+    @classmethod
+    def get_settings(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
 class PaymentRequest(models.Model):
     """Student yuborgan to'lov so'rovi (chek rasmi bilan).
 

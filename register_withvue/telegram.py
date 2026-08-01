@@ -414,6 +414,83 @@ def _personalize(text, student, month=""):
     )
 
 
+UZ_MONTHS = [
+    "Yanvar", "Fevral", "Mart", "Aprel", "May", "Iyun",
+    "Iyul", "Avgust", "Sentabr", "Oktabr", "Noyabr", "Dekabr",
+]
+
+
+def _money(value):
+    return f"{int(value or 0):,}".replace(",", " ") + " so'm"
+
+
+def _month_label(month):
+    """'2026-07' -> 'Iyul 2026'."""
+    try:
+        year, mon = month.split("-")
+        return f"{UZ_MONTHS[int(mon) - 1]} {year}"
+    except (ValueError, IndexError, AttributeError):
+        return month or ""
+
+
+def build_receipt(payment):
+    """To'lov cheki matnini sozlamadagi shablondan tuzadi."""
+    from django.utils import timezone
+
+    from .models import ReceiptSettings
+
+    settings_obj = ReceiptSettings.get_settings()
+    student = payment.student
+    group = student.groups.first() if student else None
+
+    due = max(0, (payment.amount_due or 0) - (payment.discount or 0))
+    paid = payment.paid_amount or 0
+
+    values = {
+        "{ism}": f"{student.name} {student.surname}".strip() if student else "",
+        "{oy}": _month_label(payment.month),
+        "{summa}": _money(paid),
+        "{jami}": _money(due),
+        "{qolgan}": _money(max(0, due - paid)),
+        "{sana}": timezone.localdate().strftime("%d.%m.%Y"),
+        "{markaz}": settings_obj.center_name,
+        "{guruh}": group.name if group else "—",
+    }
+
+    text = settings_obj.template or ReceiptSettings.DEFAULT_TEMPLATE
+    for key, val in values.items():
+        text = text.replace(key, str(val))
+    return text
+
+
+def send_receipt(payment):
+    """To'lov tasdiqlangach o'quvchiga chek yuboradi.
+
+    Fon oqimida — menejer tugmani bosgach panel Telegramni kutib
+    turmasin. Chek o'chirilgan yoki o'quvchi botga ulanmagan bo'lsa
+    jim o'tib ketadi.
+    """
+    from .models import ReceiptSettings
+
+    if not ReceiptSettings.get_settings().enabled:
+        return
+    if not payment.student_id:
+        return
+
+    text = build_receipt(payment)
+    student_id = payment.student_id
+
+    def run():
+        subs = TelegramSubscriber.objects.filter(student_id=student_id)
+        for sub in subs:
+            try:
+                send_text(sub.chat_id, text)
+            except Exception:  # noqa: BLE001
+                logger.exception("Chek yuborilmadi (chat=%s)", sub.chat_id)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def send_photo(chat_id, photo_url, caption=""):
     """Rasm yuboradi. Rasm URL bo'lishi kerak (mahsulot rasmi shunday)."""
     payload = {"chat_id": chat_id, "photo": photo_url, "parse_mode": "HTML"}

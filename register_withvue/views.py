@@ -3095,6 +3095,16 @@ def confirm_payment(request, payment_id):
                 paid_amount=payment.paid_amount,
             )
 
+        # To'lov endigina tasdiqlangan bo'lsa o'quvchiga chek ketadi.
+        # Faqat o'tish paytida — qayta saqlashda takror yuborilmasin.
+        if payment.is_paid and not paid_before:
+            try:
+                from . import telegram as tg
+
+                tg.send_receipt(payment)
+            except Exception:  # noqa: BLE001 — chek to'lovni to'smasin
+                logging.getLogger(__name__).exception("Chek yuborilmadi")
+
         return JsonResponse(
             {
                 "message": "To'lov yangilandi!",
@@ -4039,12 +4049,107 @@ def get_group_leaderboard(request):
         return JsonResponse({"error": str(e)}, status=500)
 
 
+def get_receipt_settings(request):
+    """Chek matni va o'rniga qo'yiladigan kalitlar ro'yxati."""
+    denied = require_permission(request, "receipt.settings")
+    if denied:
+        return denied
+    from .models import ReceiptSettings
+
+    s = ReceiptSettings.get_settings()
+    return JsonResponse(
+        {
+            "enabled": s.enabled,
+            "template": s.template,
+            "center_name": s.center_name,
+            "default_template": ReceiptSettings.DEFAULT_TEMPLATE,
+            "placeholders": [
+                {"key": k, "label": v} for k, v in ReceiptSettings.PLACEHOLDERS
+            ],
+        }
+    )
+
+
+@csrf_exempt
+def update_receipt_settings(request):
+    """Chek matnini saqlaydi."""
+    if request.method not in ("POST", "PATCH"):
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_permission(request, "receipt.settings")
+    if denied:
+        return denied
+    try:
+        from .models import ReceiptSettings
+
+        data = json.loads(request.body)
+        s = ReceiptSettings.get_settings()
+
+        if "enabled" in data:
+            s.enabled = bool(data["enabled"])
+        if "center_name" in data:
+            s.center_name = str(data["center_name"] or "").strip()[:100]
+        if "template" in data:
+            template = str(data["template"] or "").strip()
+            if not template:
+                return JsonResponse(
+                    {"error": "Chek matni bo'sh bo'lishi mumkin emas"}, status=400
+                )
+            s.template = template[:4000]
+        s.save()
+
+        log_action(
+            request,
+            "receipt.settings",
+            "To'lov cheki matni o'zgartirildi"
+            + ("" if s.enabled else " (yuborish o'chirildi)"),
+            target_type="settings",
+            target_name="To'lov cheki",
+            enabled=s.enabled,
+        )
+        return JsonResponse({"message": "Saqlandi", "enabled": s.enabled})
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+@csrf_exempt
+def preview_receipt(request):
+    """Chek qanday ko'rinishini namuna ma'lumot bilan ko'rsatadi."""
+    denied = require_permission(request, "receipt.settings")
+    if denied:
+        return denied
+    try:
+        from . import telegram as tg
+        from .models import ReceiptSettings
+
+        data = json.loads(request.body or "{}") if request.body else {}
+        s = ReceiptSettings.get_settings()
+        template = str(data.get("template") or s.template)
+
+        sample = {
+            "{ism}": "Aliyev Vali",
+            "{oy}": "Iyul 2026",
+            "{summa}": "500 000 so'm",
+            "{jami}": "600 000 so'm",
+            "{qolgan}": "100 000 so'm",
+            "{sana}": timezone.localdate().strftime("%d.%m.%Y"),
+            "{markaz}": s.center_name,
+            "{guruh}": "Frontend-1",
+        }
+        for k, v in sample.items():
+            template = template.replace(k, v)
+        return JsonResponse({"preview": template})
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
 @csrf_exempt
 def send_message_leads(request):
     """Botga ulangan leadlarga reklama xabari. Body: {text}"""
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
-    denied = require_permission(request, "messages.send")
+    denied = require_permission(request, "messages.leads")
     if denied:
         return denied
     try:
@@ -4077,7 +4182,7 @@ def send_message_teachers(request):
     """Ustozlarga xabar. Body: {text, teacher_ids?}"""
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
-    denied = require_permission(request, "messages.send")
+    denied = require_permission(request, "messages.teachers")
     if denied:
         return denied
     try:

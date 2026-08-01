@@ -217,6 +217,9 @@ urlpatterns = [
     path("messages/send-students/", views.send_message_students),
     path("messages/send-leads/", views.send_message_leads),
     path("messages/send-teachers/", views.send_message_teachers),
+    path("receipt-settings/", views.get_receipt_settings),
+    path("receipt-settings/update/", views.update_receipt_settings),
+    path("receipt-settings/preview/", views.preview_receipt),
     path("lessons/send-reminders/", views.send_lesson_reminders),
     path("messages/history/", views.get_message_history),
     # ───────────────────────────────

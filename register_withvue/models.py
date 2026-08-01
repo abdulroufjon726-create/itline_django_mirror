@@ -150,6 +150,17 @@ class Student(models.Model):
     note = models.TextField(blank=True, verbose_name="Izoh")
     source = models.CharField(max_length=30, blank=True, default="")
 
+    # Yuz tanish terminalidagi shaxs raqami (Hikvision'da "employee No").
+    # Terminal yuzni tanigach shu raqamni yuboradi — biz shu orqali
+    # o'quvchini topamiz. Bo'sh bo'lsa o'quvchi terminalga bog'lanmagan.
+    face_person_id = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        db_index=True,
+        verbose_name="Terminaldagi raqami",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -970,6 +981,113 @@ class LoginDevice(models.Model):
 
     def __str__(self):
         return f"{self.user_name or self.phone} — {self.device_id[:8]}"
+
+
+class FaceDevice(models.Model):
+    """Yuz tanish terminali (Hikvision DS-K1T3xx kabi).
+
+    Terminal odatda lokal tarmoqda turadi va bulutdagi serverga
+    hodisa yuboradi ("HTTP listening"). Terminal serverga chiqa oladi,
+    lekin server terminalga kira olmaydi — shuning uchun `host`
+    ixtiyoriy: faqat terminalga tashqaridan kirish sozlangan bo'lsa
+    to'ldiriladi va o'shanda saytdan yuz yuborish ham ishlaydi.
+    """
+
+    name = models.CharField(max_length=100, verbose_name="Nomi")
+    serial = models.CharField(
+        max_length=64, blank=True, db_index=True, verbose_name="Seriya raqami"
+    )
+    location = models.CharField(max_length=100, blank=True, verbose_name="Joyi")
+
+    # Terminal shu manzilga hodisa yuboradi; manzildagi maxfiy kalit
+    # orqali begona so'rovlar ajratiladi (terminal qo'shimcha sarlavha
+    # yubora olmaydi, shuning uchun kalit URL ichida)
+    secret = models.CharField(max_length=64, unique=True, verbose_name="Maxfiy kalit")
+
+    # ── Ixtiyoriy: saytdan terminalga yuborish uchun ──
+    host = models.CharField(
+        max_length=200,
+        blank=True,
+        verbose_name="Terminal manzili (http://ip:port)",
+    )
+    username = models.CharField(max_length=64, blank=True, verbose_name="Login")
+    password = models.CharField(max_length=128, blank=True, verbose_name="Parol")
+
+    is_active = models.BooleanField(default=True, verbose_name="Faol")
+    last_event_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="Oxirgi hodisa"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Yuz tanish terminali"
+        verbose_name_plural = "Yuz tanish terminallari"
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def can_push(self):
+        """Saytdan terminalga yuborish sozlanganmi."""
+        return bool(self.host and self.username)
+
+
+class FaceEvent(models.Model):
+    """Terminaldan kelgan bitta hodisa.
+
+    Muvaffaqiyatlisi ham, tanilmagani ham yoziladi — supermenejer
+    nima kelayotganini ko'rib, bog'lanmagan raqamlarni topa olsin.
+    """
+
+    STATUS_CHOICES = [
+        ("marked", "Davomat belgilandi"),
+        ("already", "Allaqachon belgilangan"),
+        ("no_lesson", "Bugun dars yo'q"),
+        ("no_group", "Guruhga biriktirilmagan"),
+        ("unknown", "O'quvchi topilmadi"),
+        ("ignored", "E'tiborsiz qoldirildi"),
+    ]
+
+    device = models.ForeignKey(
+        FaceDevice,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="events",
+    )
+    person_id = models.CharField(
+        max_length=32, db_index=True, verbose_name="Terminaldagi raqam"
+    )
+    person_name = models.CharField(max_length=200, blank=True)
+
+    student = models.ForeignKey(
+        Student,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="face_events",
+    )
+    attendance = models.ForeignKey(
+        Attendance,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="face_events",
+    )
+
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default="unknown")
+    note = models.CharField(max_length=255, blank=True)
+
+    happened_at = models.DateTimeField(verbose_name="Terminal vaqti")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Yuz tanish hodisasi"
+        verbose_name_plural = "Yuz tanish hodisalari"
+
+    def __str__(self):
+        return f"{self.person_id} — {self.status}"
 
 
 class ActivityLog(models.Model):

@@ -1911,13 +1911,30 @@ def register_student(request):
                 {"error": "Telefon raqam kiritilishi shart"}, status=400
             )
 
-        if _find_student_by_any_phone(phone):
+        existing = _find_student_by_any_phone(phone)
+        if existing:
+            # Kim egalik qilayotganini aytamiz. Ustoz/menejer profillari
+            # hech qaysi ro'yxatda ko'rinmaydi — "allaqachon bor" degan
+            # quruq xabar bilan ularni topib bo'lmasdi.
+            kind = (
+                "menejer profili"
+                if existing.is_excellence
+                else "ustoz profili" if existing.is_admin else "o'quvchi"
+            )
+            who = f"{existing.name} {existing.surname}".strip()
             return JsonResponse(
                 {
                     "error": (
-                        "Bu telefon raqam allaqachon ro'yxatda bor. "
+                        f"Bu raqam allaqachon band — {who} ({kind}). "
                         "Kirish uchun parol sifatida ism va familiyangizni yozing."
-                    )
+                    ),
+                    "holder": {
+                        "id": existing.id,
+                        "name": who,
+                        "kind": kind,
+                        "is_admin": existing.is_admin,
+                        "is_excellence": existing.is_excellence,
+                    },
                 },
                 status=400,
             )

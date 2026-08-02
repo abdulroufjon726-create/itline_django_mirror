@@ -76,6 +76,45 @@ class SendToStudentsTests(TestCase):
         self.assertEqual((sent, failed, no_chat), (1, 0, 0))
 
 
+class SendTextHtmlTests(TestCase):
+    """Regressiya: xabarlar <b> teglari bilan, matn ko'rinishida ketardi."""
+
+    @patch.object(tg, "tg_call")
+    def test_tags_are_sent_as_html(self, tg_call):
+        tg.send_text(1, "🧾 <b>Chek</b>")
+        payload = tg_call.call_args[0][1]
+        self.assertEqual(payload["parse_mode"], "HTML")
+        self.assertEqual(payload["text"], "🧾 <b>Chek</b>")
+
+    @patch.object(tg, "tg_call")
+    def test_stray_angle_brackets_are_escaped(self, tg_call):
+        """Menejer yozgan "5 < 6" yoki <div> xabarni buzmasligi kerak."""
+        tg.send_text(1, "5 < 6 & <div>salom</div>")
+        payload = tg_call.call_args[0][1]
+        self.assertEqual(
+            payload["text"], "5 &lt; 6 &amp; &lt;div&gt;salom&lt;/div&gt;"
+        )
+
+    @patch.object(tg, "tg_call")
+    def test_falls_back_to_plain_text_on_parse_error(self, tg_call):
+        tg_call.side_effect = [
+            RuntimeError("Bad Request: can't parse entities"),
+            {"ok": True},
+        ]
+        tg.send_text(1, "<b>Chek</b>")
+        self.assertEqual(tg_call.call_count, 2)
+        second = tg_call.call_args[0][1]
+        self.assertNotIn("parse_mode", second)
+        self.assertEqual(second["text"], "<b>Chek</b>")
+
+    @patch.object(tg, "tg_call")
+    def test_other_errors_are_not_retried(self, tg_call):
+        tg_call.side_effect = RuntimeError("Forbidden: bot was blocked")
+        with self.assertRaises(RuntimeError):
+            tg.send_text(1, "Salom")
+        self.assertEqual(tg_call.call_count, 1)
+
+
 class TgCallTests(TestCase):
     def test_missing_token_raises_clear_error(self):
         with self.settings(TG_BOT_TOKEN=""):

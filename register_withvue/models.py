@@ -108,7 +108,13 @@ class Student(models.Model):
 
     name = models.CharField(max_length=100)
     surname = models.CharField(max_length=100)
-    phone = models.CharField(max_length=20, unique=True)
+    # Bitiruvchida raqam saqlanmaydi — undan faqat ism-familiya qoladi.
+    # Shuning uchun maydon bo'sh bo'la olishi kerak, lekin `unique` ham
+    # saqlanishi shart: bo'sh satr ("") ikkinchi bitiruvchida darhov
+    # to'qnashardi, NULL esa unikal indeksda cheklanmaydi.
+    phone = models.CharField(
+        max_length=20, unique=True, null=True, blank=True
+    )
     phone2 = models.CharField(max_length=50, blank=True, verbose_name="Qo'shimcha telefon")
     password = models.CharField(max_length=255, blank=True)
 

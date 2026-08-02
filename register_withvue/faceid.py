@@ -1,6 +1,6 @@
 """Yuz tanish terminali bilan ishlash (Hikvision DS-K1T3xx).
 
-Ikki yo'nalish bor:
+Uch yo'nalish bor:
 
 1. Terminal → server ("HTTP listening"). Terminal yuzni taniganda
    hodisani shu yerdagi webhook'ga yuboradi, biz davomatni belgilaymiz.
@@ -10,15 +10,33 @@ Ikki yo'nalish bor:
 2. Server → terminal (ISAPI). O'quvchi va uning rasmini terminalga
    yuborish. Bu faqat terminalga tashqaridan kirish mumkin bo'lganda
    ishlaydi (statik IP / port forwarding), shuning uchun ixtiyoriy.
+
+3. Terminal yonidagi agent → server. Terminal NAT ortida bo'lsa (odatiy
+   holat) serverdan unga kirib bo'lmaydi. O'shanda lokal tarmoqdagi
+   kichik skript navbatni serverdan o'zi olib, terminalga yozadi —
+   `pending_for_device` / `mark_synced` shu uchun.
+
+O'quvchining yuz rasmi Telegram bot orqali keladi va bazada base64
+JPEG bo'lib saqlanadi. Har o'quvchiga takrorlanmas raqam beriladi —
+Hikvision uni `employeeNo` deb ataydi.
 """
 
 import base64
+import io
 import json
 import logging
 
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from .models import Attendance, FaceDevice, FaceEvent, Group, Lesson, Student
+from .models import (
+    Attendance,
+    FaceDevice,
+    FaceEvent,
+    FaceSync,
+    Lesson,
+    Student,
+)
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +45,26 @@ DEFAULT_GRACE_MINUTES = 15
 
 ODD_DAYS = {0, 2, 4}
 EVEN_DAYS = {1, 3, 5}
+
+# ── Yuz rasmi talablari (Hikvision DS-K1T3xx hujjatidan) ──
+# Terminal 200 KB dan katta rasmni qabul qilmaydi va juda katta
+# o'lchamni ham rad etadi. Rasm shu chegaralarga o'zi moslashtiriladi,
+# ya'ni o'quvchi telefonidan chiqqan 3 MB lik surat ham yaraydi.
+MAX_PHOTO_BYTES = 200 * 1024
+MAX_PHOTO_SIDE = 1024
+MIN_PHOTO_SIDE = 240
+
+# Tomonlar nisbati 4:3 (yoki portret holatda 3:4) bo'lishi so'raladi.
+# Aniq 1.333 ni talab qilsak telefon suratlari deyarli hech qachon
+# o'tmasdi, shuning uchun atrofidagi oraliq qabul qilinadi. 16:9 (1.78)
+# va kvadrat (1.0) bundan tashqarida qoladi — ular yuz uchun yomon
+# kadr: birinchisida yuz juda kichik, ikkinchisida odatda kesilgan.
+MIN_ASPECT = 1.15
+MAX_ASPECT = 1.60
+
+# Terminal raqamlari shu sondan boshlanadi. O'quvchi ID siga qo'shiladi,
+# ya'ni raqam hech qachon takrorlanmaydi: ID lar qayta ishlatilmaydi.
+PERSON_ID_BASE = 10000
 
 
 # ─────────────────────────────────────────
@@ -275,8 +313,303 @@ def handle_event(device, info):
 
 
 # ─────────────────────────────────────────
+# YUZ RO'YXATGA OLISH (bot orqali)
+# ─────────────────────────────────────────
+
+
+def allocate_person_id(student):
+    """O'quvchiga takrorlanmas terminal raqamini beradi.
+
+    Raqami bo'lsa o'sha qaytariladi — bir marta berilgan raqam
+    o'zgarmaydi, aks holda terminalda ikkita yozuv paydo bo'lardi.
+
+    Asos sifatida o'quvchi ID si olinadi: ID lar avtomatik o'sadi va
+    o'chirilgandan keyin ham qayta ishlatilmaydi, ya'ni raqam hech
+    qachon ikkinchi odamga tushmaydi. Yagona to'qnashuv ehtimoli —
+    o'sha raqam ilgari panelda qo'lda kiritilgan bo'lsa; o'shanda
+    bo'shini topguncha yuqoriga suriladi.
+    """
+    if student.face_person_id:
+        return student.face_person_id
+
+    taken = set(
+        Student.objects.exclude(face_person_id="")
+        .exclude(id=student.id)
+        .values_list("face_person_id", flat=True)
+    )
+
+    candidate = PERSON_ID_BASE + student.id
+    while str(candidate) in taken:
+        candidate += 1
+
+    person_id = str(candidate)
+    student.face_person_id = person_id
+    try:
+        with transaction.atomic():
+            student.save(update_fields=["face_person_id"])
+    except IntegrityError:
+        # Ikki so'rov bir vaqtda kelib bir xil raqamni tanlagan. Bazadagi
+        # unikal cheklov ushlab qoldi — qayta o'qib, bo'shidan davom
+        # etamiz. `transaction.atomic` bo'lmasa Postgres'da tranzaksiya
+        # buzilib, keyingi so'rovlar ham yiqilardi.
+        student.refresh_from_db(fields=["face_person_id"])
+        if student.face_person_id:
+            return student.face_person_id
+        return allocate_person_id(student)
+
+    return person_id
+
+
+def normalize_photo(raw):
+    """Yuz rasmini terminal qabul qiladigan ko'rinishga keltiradi.
+
+    Qaytaradi: (base64_jpeg, xato_matni). Xato bo'lsa birinchisi None
+    va matn to'g'ridan-to'g'ri o'quvchiga yuboriladi — shuning uchun u
+    tushunarli va nima qilish kerakligini aytadigan bo'lishi kerak.
+    """
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:  # pragma: no cover — pillow requirements'da bor
+        return None, "Serverda rasm kutubxonasi yo'q — administratorga ayting"
+
+    try:
+        image = Image.open(io.BytesIO(raw))
+        # Telefon suratida haqiqiy burilish EXIF ichida bo'ladi. Uni
+        # qo'llamasak yonboshlagan yuz terminalga yotgan holda tushardi.
+        image = ImageOps.exif_transpose(image)
+        image = image.convert("RGB")
+    except Exception:  # noqa: BLE001 — buzuq fayl ham shu yerga tushadi
+        return None, "Rasmni o'qib bo'lmadi. Oddiy JPG rasm yuboring."
+
+    width, height = image.size
+    if min(width, height) < MIN_PHOTO_SIDE:
+        return None, (
+            f"Rasm juda kichik ({width}×{height}). Kamida "
+            f"{MIN_PHOTO_SIDE} nuqta bo'lsin — yaqinroqdan qayta suratga oling."
+        )
+
+    aspect = max(width, height) / min(width, height)
+    if not (MIN_ASPECT <= aspect <= MAX_ASPECT):
+        return None, (
+            f"Rasm o'lchami 4:3 emas ({width}×{height}).\n\n"
+            "Telefon kamerasida o'lchamni «4:3» qilib qo'ying yoki rasmni "
+            "kesib (crop) 4:3 ga keltiring. Kvadrat va cho'zinchoq (16:9) "
+            "rasmlar yaramaydi — yuz juda kichik chiqadi."
+        )
+
+    # Kattasini kichraytiramiz: terminal katta rasmni rad etadi, kichigi
+    # esa tanishga baribir yetarli
+    if max(width, height) > MAX_PHOTO_SIDE:
+        image.thumbnail((MAX_PHOTO_SIDE, MAX_PHOTO_SIDE), Image.LANCZOS)
+
+    # 200 KB ga sig'guncha sifatni pasaytiramiz. Sifat 55 dan pastga
+    # tushmaydi — undan keyin yuz "loyqa"lashib, terminal tanimay
+    # qo'yadi; o'shanda o'lchamni kichraytirgan ma'qul.
+    for quality in (88, 78, 68, 58):
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG", quality=quality, optimize=True)
+        data = buf.getvalue()
+        if len(data) <= MAX_PHOTO_BYTES:
+            return base64.b64encode(data).decode(), None
+
+    image.thumbnail((640, 640), Image.LANCZOS)
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG", quality=75, optimize=True)
+    data = buf.getvalue()
+    if len(data) > MAX_PHOTO_BYTES:
+        return None, "Rasm juda og'ir — boshqa rasm yuboring."
+    return base64.b64encode(data).decode(), None
+
+
+def save_face_photo(student, raw):
+    """Botdan kelgan rasmni o'quvchiga biriktiradi.
+
+    Qaytaradi: (person_id, xato_matni). Xato bo'lsa birinchisi None.
+    """
+    photo_b64, error = normalize_photo(raw)
+    if error:
+        return None, error
+
+    person_id = allocate_person_id(student)
+
+    student.face_photo = photo_b64
+    student.face_status = "pending"
+    student.face_note = ""
+    student.face_updated_at = timezone.now()
+    student.save(
+        update_fields=["face_photo", "face_status", "face_note", "face_updated_at"]
+    )
+    return person_id, None
+
+
+def pending_students(device=None):
+    """Terminalga yozilishi kerak bo'lgan o'quvchilar.
+
+    Rasmi bor va rad etilmagan har bir o'quvchi shu ro'yxatga tushadi;
+    `device` berilsa faqat o'sha terminalga hali yozilmaganlari yoki
+    yozilganidan keyin rasmini almashtirganlari qoladi.
+    """
+    qs = (
+        Student.objects.exclude(face_photo="")
+        .exclude(face_person_id="")
+        .exclude(face_status="rejected")
+        .order_by("id")
+    )
+    if device is None:
+        return list(qs)
+
+    synced = {
+        row["student_id"]: row["photo_at"]
+        for row in FaceSync.objects.filter(device=device, ok=True).values(
+            "student_id", "photo_at"
+        )
+    }
+
+    pending = []
+    for student in qs:
+        was = synced.get(student.id)
+        # Hech qachon yozilmagan, yoki yozilganidan keyin yangi rasm kelgan
+        if was is None or (student.face_updated_at and student.face_updated_at > was):
+            pending.append(student)
+    return pending
+
+
+def mark_synced(device, student, ok=True, error=""):
+    """Terminalga yozilgani (yoki yozilmagani) qayd etiladi.
+
+    Qaytaradi: xato o'quvchi uchun yangimi. Agent navbatni har necha
+    daqiqada qayta oladi va o'sha xato takrorlanaveradi — shu bayroq
+    bo'lmasa o'quvchiga bir xil ogohlantirish soatlab kelib turardi.
+    """
+    error = error[:255]
+    FaceSync.objects.update_or_create(
+        device=device,
+        student=student,
+        defaults={"photo_at": student.face_updated_at, "ok": ok, "error": error},
+    )
+
+    if ok:
+        if student.face_status != "synced":
+            student.face_status = "synced"
+            student.face_note = ""
+            student.save(update_fields=["face_status", "face_note"])
+        return False
+
+    if error and student.face_note != error:
+        student.face_note = error
+        student.save(update_fields=["face_note"])
+        return True
+    return False
+
+
+def sync_device(device, students=None, notify=True):
+    """Kutayotgan yuzlarni terminalga yozadi (ISAPI orqali).
+
+    Faqat terminal manzili sozlangan bo'lsa ishlaydi. Qaytaradi:
+    (yozildi, xato_bo'ldi, xabarlar_ro'yxati).
+    """
+    if not device.can_push:
+        return 0, 0, ["Terminal manzili sozlanmagan"]
+
+    if students is None:
+        students = pending_students(device)
+
+    done = failed = 0
+    notes = []
+    for student in students:
+        ok, message = push_student(device, student, student.face_photo)
+        is_new_error = mark_synced(device, student, ok, "" if ok else message)
+        if ok:
+            done += 1
+        else:
+            failed += 1
+            notes.append(f"{student}: {message}")
+            if notify and is_new_error:
+                notify_photo_rejected(student, message)
+    return done, failed, notes
+
+
+def notify_photo_rejected(student, reason):
+    """Terminal rasmni qabul qilmasa o'quvchiga aytamiz.
+
+    Aks holda u rasm yuborgan-u, davomat esa ishlamay turgan bo'lardi —
+    va buni faqat coini kamayganda bilib qolardi.
+    """
+    from . import telegram as tg
+    from .models import TelegramSubscriber
+
+    text = (
+        "⚠️ <b>Face ID rasmi qabul qilinmadi</b>\n\n"
+        f"Sabab: {reason}\n\n"
+        "Iltimos, yangi rasm yuboring: yuzingiz to'liq va yorug' ko'rinsin, "
+        "ko'zoynak va bosh kiyimsiz, 4:3 o'lchamda."
+    )
+    for sub in TelegramSubscriber.objects.filter(student=student):
+        try:
+            tg.send_text(sub.chat_id, text)
+        except Exception:  # noqa: BLE001 — xabar ketmasa ham sinx to'xtamasin
+            log.exception("Yuz rad javobi ketmadi (chat=%s)", sub.chat_id)
+
+
+# ─────────────────────────────────────────
 # SERVER → TERMINAL (ISAPI)
 # ─────────────────────────────────────────
+
+
+# Hikvision xatolarining odam tushunadigan tarjimasi. Terminal
+# `subStatusCode` da sababni aytadi — o'quvchiga «statusCode 6» emas,
+# nima qilish kerakligi ko'rinsin.
+ISAPI_ERRORS = {
+    "employeeNoAlreadyExist": "Bu raqam terminalda allaqachon bor",
+    "lowFaceQuality": "Yuz sifati past — yorug'roq joyda qayta suratga oling",
+    "faceQualityLow": "Yuz sifati past — yorug'roq joyda qayta suratga oling",
+    "noFaceDetected": "Rasmda yuz topilmadi",
+    "detectNoFace": "Rasmda yuz topilmadi",
+    "faceDetectFailed": "Rasmda yuz aniqlanmadi — yuzingiz to'liq ko'rinsin",
+    "imageSizeExceedLimit": "Rasm hajmi terminal chegarasidan katta",
+    "notSupport": "Terminal bu amalni qo'llab-quvvatlamaydi",
+    "riskPassword": "Terminal parolini almashtirish talab qilinmoqda",
+    "badAuthorization": "Login yoki parol noto'g'ri",
+    "invalidContent": "Terminal so'rovni tushunmadi",
+}
+
+
+def _isapi_result(res):
+    """ISAPI javobini o'qiydi. Qaytaradi: (muvaffaqiyat, xato_matni, kod).
+
+    Hikvision xatoni ko'pincha HTTP 200 bilan, javob tanasida qaytaradi
+    (`statusCode` 1 dan boshqa bo'ladi). Faqat `status_code` ga
+    qarasak, «yuz topilmadi» degan javob ham "yozildi" bo'lib
+    ko'rinardi — o'quvchi terminalda yo'q holda davomat kutib yurardi.
+
+    Uchinchi qiymat — terminalning o'z kodi (`subStatusCode`). Xabar
+    o'zbekchaga o'girilgani uchun uni matndan qidirib bo'lmaydi.
+    """
+    body = {}
+    try:
+        body = res.json()
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    sub = str(body.get("subStatusCode") or "")
+    status = body.get("statusCode")
+
+    if res.status_code < 400 and (status in (None, 1) or status == "1"):
+        return True, "", sub
+
+    if sub:
+        return False, ISAPI_ERRORS.get(sub, sub), sub
+
+    text = (body.get("statusString") or res.text or "").strip()
+    return False, f"Terminal rad etdi ({res.status_code}): {text[:120]}", ""
+
+
+def _is_already_exists(code):
+    """Terminal «bu raqam allaqachon bor» deyaptimi."""
+    lowered = str(code).lower()
+    return "alreadyexist" in lowered or "exist" in lowered
 
 
 def push_student(device, student, photo_b64=""):
@@ -300,29 +633,43 @@ def push_student(device, student, photo_b64=""):
     base = device.host.rstrip("/")
     name = f"{student.name} {student.surname}".strip()[:32]
 
+    user_info = {
+        "UserInfo": {
+            "employeeNo": student.face_person_id,
+            "name": name,
+            "userType": "normal",
+            "Valid": {
+                "enable": True,
+                "beginTime": "2020-01-01T00:00:00",
+                "endTime": "2035-12-31T23:59:59",
+                "timeType": "local",
+            },
+        }
+    }
+
     try:
         res = requests.post(
             f"{base}/ISAPI/AccessControl/UserInfo/Record?format=json",
             auth=auth,
             timeout=15,
-            json={
-                "UserInfo": {
-                    "employeeNo": student.face_person_id,
-                    "name": name,
-                    "userType": "normal",
-                    "Valid": {
-                        "enable": True,
-                        "beginTime": "2020-01-01T00:00:00",
-                        "endTime": "2035-12-31T23:59:59",
-                        "timeType": "local",
-                    },
-                }
-            },
+            json=user_info,
         )
-        if res.status_code >= 400:
-            # Allaqachon bor bo'lsa — bu xato emas, davom etamiz
-            if "exist" not in res.text.lower():
-                return False, f"Terminal rad etdi ({res.status_code}): {res.text[:120]}"
+        ok, message, code = _isapi_result(res)
+        if not ok:
+            if not _is_already_exists(code):
+                return False, message
+            # Allaqachon bor — ismi o'zgargan bo'lishi mumkin, yangilaymiz.
+            # `Record` ni takrorlash foydasiz: u har safar shu xatoni
+            # qaytaraveradi va o'quvchi eski ism bilan qolib ketardi.
+            res = requests.put(
+                f"{base}/ISAPI/AccessControl/UserInfo/Modify?format=json",
+                auth=auth,
+                timeout=15,
+                json=user_info,
+            )
+            ok, message, _code = _isapi_result(res)
+            if not ok:
+                return False, message
     except Exception as exc:  # noqa: BLE001
         return False, f"Terminalga ulanib bo'lmadi: {exc}"
 
@@ -354,8 +701,9 @@ def push_student(device, student, photo_b64=""):
                 "img": ("face.jpg", image, "image/jpeg"),
             },
         )
-        if res.status_code >= 400:
-            return False, f"Yuz qabul qilinmadi ({res.status_code}): {res.text[:120]}"
+        ok, message, _code = _isapi_result(res)
+        if not ok:
+            return False, message
     except Exception as exc:  # noqa: BLE001
         return False, f"Yuz yuborilmadi: {exc}"
 

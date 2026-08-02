@@ -32,6 +32,7 @@ from .models import (
     Expense,
     FaceDevice,
     FaceEvent,
+    FaceSync,
     LoginDevice,
     Manager,
     Student,
@@ -382,6 +383,8 @@ def get_face_devices(request):
     if denied:
         return denied
 
+    from . import faceid
+
     base = request.build_absolute_uri("/").rstrip("/")
     rows = []
     for d in FaceDevice.objects.order_by("name"):
@@ -399,8 +402,11 @@ def get_face_devices(request):
                 "events_today": d.events.filter(
                     created_at__gte=timezone.now() - timedelta(days=1)
                 ).count(),
+                "pending_faces": len(faceid.pending_students(d)),
                 # Terminal sozlamasiga aynan shu manzil yoziladi
                 "webhook_url": f"{base}/api/faceid/event/{d.secret}/",
+                # Lokal agent yuz navbatini shu manzildan oladi
+                "sync_url": f"{base}/api/faceid/sync/{d.secret}/",
             }
         )
     return JsonResponse(rows, safe=False)
@@ -586,7 +592,11 @@ def push_student_to_device(request, device_id, student_id):
     if not device or not student:
         return JsonResponse({"error": "Terminal yoki o'quvchi topilmadi"}, status=404)
 
-    ok, message = faceid.push_student(device, student, data.get("photo") or "")
+    # Rasm berilmasa botdan kelgani ishlatiladi — panelda «yuborish»
+    # tugmasi rasmni qayta so'ramasin
+    photo = data.get("photo") or student.face_photo
+    ok, message = faceid.push_student(device, student, photo)
+    faceid.mark_synced(device, student, ok, "" if ok else message)
     if not ok:
         return JsonResponse({"error": message}, status=400)
 
@@ -599,6 +609,286 @@ def push_student_to_device(request, device_id, student_id):
         target_name=str(student),
     )
     return JsonResponse({"message": message})
+
+
+# ─────────────────────────────────────────
+# BOTDAN KELGAN YUZLAR
+# ─────────────────────────────────────────
+
+
+def _enrollment_row(student, sync_by_student):
+    sync = sync_by_student.get(student.id)
+    return {
+        "id": student.id,
+        "name": f"{student.name} {student.surname}".strip(),
+        "person_id": student.face_person_id,
+        "status": student.face_status,
+        "status_label": student.get_face_status_display(),
+        "note": student.face_note,
+        "updated_at": student.face_updated_at,
+        "has_photo": bool(student.face_photo),
+        "synced_at": sync.synced_at if sync and sync.ok else None,
+        "sync_error": sync.error if sync and not sync.ok else "",
+    }
+
+
+def get_face_enrollments(request):
+    """Bot orqali yuz rasmi yuborgan o'quvchilar.
+
+    Rasmning o'zi bu yerda qaytmaydi — 200 o'quvchi × 150 KB javobni
+    og'irlashtirardi. Panel har rasmni alohida `.../photo/` orqali
+    oladi va brauzer uni keshlaydi.
+    """
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    students = list(
+        Student.objects.exclude(face_photo="").order_by(
+            "face_status", "-face_updated_at"
+        )
+    )
+
+    device_id = request.GET.get("device")
+    sync_by_student = {}
+    if device_id:
+        sync_by_student = {
+            s.student_id: s
+            for s in FaceSync.objects.filter(device_id=device_id)
+        }
+
+    counts = {"pending": 0, "synced": 0, "rejected": 0}
+    for s in students:
+        if s.face_status in counts:
+            counts[s.face_status] += 1
+
+    return JsonResponse(
+        {
+            "rows": [_enrollment_row(s, sync_by_student) for s in students],
+            "counts": counts,
+        }
+    )
+
+
+def get_face_photo(request, student_id):
+    """O'quvchining yuz rasmi (JPEG)."""
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    student = Student.objects.filter(id=student_id).only("face_photo").first()
+    if not student or not student.face_photo:
+        return JsonResponse({"error": "Rasm yo'q"}, status=404)
+
+    import base64
+
+    from django.http import HttpResponse
+
+    try:
+        raw = base64.b64decode(student.face_photo)
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "Rasm buzilgan"}, status=500)
+
+    response = HttpResponse(raw, content_type="image/jpeg")
+    # Rasm faqat almashganda o'zgaradi — brauzer qayta so'ramasin
+    response["Cache-Control"] = "private, max-age=600"
+    return response
+
+
+@csrf_exempt
+def set_face_status(request, student_id):
+    """Yuz rasmini tasdiqlaydi yoki rad etadi."""
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    data = _body(request)
+    if data is None:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    student = Student.objects.filter(id=student_id).first()
+    if not student:
+        return JsonResponse({"error": "O'quvchi topilmadi"}, status=404)
+
+    action = str(data.get("action") or "").strip()
+    if action not in ("approve", "reject", "delete"):
+        return JsonResponse({"error": "Noto'g'ri amal"}, status=400)
+
+    if action == "delete":
+        student.face_photo = ""
+        student.face_status = "none"
+        student.face_note = ""
+        student.face_updated_at = None
+        student.save(
+            update_fields=[
+                "face_photo",
+                "face_status",
+                "face_note",
+                "face_updated_at",
+            ]
+        )
+        # Terminalga yozilgan bo'lsa ham yozuv qoladi; qayta rasm
+        # kelganda `pending_for_device` uni yangisi bilan almashtiradi
+        message = "Rasm o'chirildi"
+    elif action == "approve":
+        student.face_status = "pending"
+        student.face_note = ""
+        # Rad etilgani qayta tasdiqlansa terminal uni yangi deb bilishi
+        # kerak — aks holda «allaqachon yozilgan» deb o'tkazib yuborardi
+        student.face_updated_at = timezone.now()
+        student.save(
+            update_fields=["face_status", "face_note", "face_updated_at"]
+        )
+        message = "Tasdiqlandi — terminalga yozilishi kutilmoqda"
+    else:
+        student.face_status = "rejected"
+        student.face_note = str(data.get("note") or "Rasm yaroqsiz")[:255]
+        student.save(update_fields=["face_status", "face_note"])
+        message = "Rad etildi"
+
+        try:
+            from . import faceid
+
+            faceid.notify_photo_rejected(student, student.face_note)
+        except Exception:  # noqa: BLE001 — xabar ketmasa ham amal bajarildi
+            pass
+
+    log_action(
+        request,
+        "faceid.link",
+        f"{student} — yuz rasmi: {message.lower()}",
+        target_type="student",
+        target_id=student.id,
+        target_name=str(student),
+        face_action=action,
+    )
+    return JsonResponse({"message": message, "status": student.face_status})
+
+
+@csrf_exempt
+def sync_face_device(request, device_id):
+    """Kutayotgan hamma yuzni terminalga yozadi (host sozlangan bo'lsa)."""
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_super(request)
+    if denied:
+        return denied
+
+    from . import faceid
+
+    device = FaceDevice.objects.filter(id=device_id).first()
+    if not device:
+        return JsonResponse({"error": "Terminal topilmadi"}, status=404)
+    if not device.can_push:
+        return JsonResponse(
+            {
+                "error": "Terminal manzili sozlanmagan. Terminal NAT ortida "
+                "bo'lsa, uning yonidagi kompyuterda sinxronlash skriptini "
+                "ishga tushiring."
+            },
+            status=400,
+        )
+
+    done, failed, notes = faceid.sync_device(device)
+    log_action(
+        request,
+        "faceid.push",
+        f"«{device.name}» terminaliga {done} ta yuz yozildi",
+        target_type="face_device",
+        target_id=device.id,
+        target_name=device.name,
+        failed=failed,
+    )
+    return JsonResponse({"synced": done, "failed": failed, "notes": notes[:10]})
+
+
+# ─────────────────────────────────────────
+# TERMINAL AGENTI (NAT ortidagi terminal uchun)
+# ─────────────────────────────────────────
+
+
+@csrf_exempt
+def faceid_sync_queue(request, secret):
+    """Terminal yonidagi agent uchun navbat.
+
+    Serverdan terminalga to'g'ridan-to'g'ri kirib bo'lmaganda (odatiy
+    holat — terminal lokal tarmoqda) sinxronlashni teskari yo'nalishda
+    qilamiz: lokal tarmoqdagi skript shu manzildan navbatni oladi va
+    terminalga o'zi yozadi.
+
+    Autentifikatsiya hodisa webhook'i bilan bir xil — URL ichidagi
+    terminal kaliti.
+
+    GET  → yozilishi kerak bo'lgan o'quvchilar (rasmi bilan)
+    POST → natijani qaytarish: {"results": [{"person_id", "ok", "error"}]}
+    """
+    from . import faceid
+
+    device = FaceDevice.objects.filter(secret=secret, is_active=True).first()
+    if not device:
+        return JsonResponse({"error": "Noto'g'ri kalit"}, status=404)
+
+    if request.method == "GET":
+        try:
+            limit = min(50, max(1, int(request.GET.get("limit") or 20)))
+        except ValueError:
+            limit = 20
+
+        pending = faceid.pending_students(device)
+        return JsonResponse(
+            {
+                "device": device.name,
+                "total": len(pending),
+                "students": [
+                    {
+                        "person_id": s.face_person_id,
+                        "name": f"{s.name} {s.surname}".strip(),
+                        "photo": s.face_photo,
+                        "updated_at": s.face_updated_at,
+                    }
+                    for s in pending[:limit]
+                ],
+            }
+        )
+
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    data = _body(request)
+    if data is None:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    results = data.get("results")
+    if not isinstance(results, list):
+        return JsonResponse({"error": "results ro'yxat bo'lishi kerak"}, status=400)
+
+    person_ids = [str(r.get("person_id") or "") for r in results if isinstance(r, dict)]
+    students = {
+        s.face_person_id: s
+        for s in Student.objects.filter(face_person_id__in=person_ids)
+    }
+
+    saved = 0
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        student = students.get(str(row.get("person_id") or ""))
+        if not student:
+            continue
+        ok = bool(row.get("ok"))
+        error = str(row.get("error") or "")
+        is_new_error = faceid.mark_synced(device, student, ok, error)
+        saved += 1
+        if is_new_error:
+            try:
+                faceid.notify_photo_rejected(student, error)
+            except Exception:  # noqa: BLE001
+                pass
+
+    FaceDevice.objects.filter(pk=device.pk).update(last_event_at=timezone.now())
+    return JsonResponse({"saved": saved})
 
 
 # ─────────────────────────────────────────

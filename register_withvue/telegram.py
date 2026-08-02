@@ -200,6 +200,21 @@ def send_text(chat_id, text, reply_markup=None):
         return tg_call("sendMessage", payload)
 
 
+# Telegram bir soniyada ~30 ta xabardan ko'pini qabul qilmaydi: undan
+# oshsa 429 qaytaradi va xabar umuman yetib bormaydi. Ommaviy yuborishda
+# har shuncha xabardan keyin bir oz kutamiz.
+BURST_SIZE = 25
+BURST_PAUSE = 1.1
+
+
+def throttle(sent):
+    """Ommaviy yuborishda Telegram cheklovini oshirib yubormaslik uchun."""
+    if sent and sent % BURST_SIZE == 0:
+        import time
+
+        time.sleep(BURST_PAUSE)
+
+
 def last9(phone):
     """Telefonning oxirgi 9 raqami (solishtirish uchun)."""
     d = re.sub(r"\D", "", str(phone or ""))
@@ -209,9 +224,210 @@ def last9(phone):
 def student_menu():
     """Ulangan o'quvchiga doimiy tugmalar."""
     return {
-        "keyboard": [[{"text": "💰 Coinlarim"}]],
+        "keyboard": [[{"text": "💰 Coinlarim"}, {"text": "🪪 Face ID"}]],
         "resize_keyboard": True,
     }
+
+
+# ─────────────────────────────────────────
+# FACE ID (yuz orqali avtomatik davomat)
+# ─────────────────────────────────────────
+
+FACE_ASK_TEXT = (
+    "🪪 <b>Face ID tizimi</b>\n\n"
+    "Darsga kelganingiz eshikdagi terminal yuzingizni tanishi orqali "
+    "avtomatik belgilanadi. Buning uchun yuzingiz rasmini yuboring.\n\n"
+    "<b>Rasm qanday bo'lsin:</b>\n"
+    "• O'lchami <b>4:3</b> (kamera sozlamasida shu o'lchamni tanlang)\n"
+    "• Faqat <b>o'zingiz</b> — yakka holda, boshqa odamsiz\n"
+    "• Yuzingiz to'liq va yorug' ko'rinsin\n"
+    "• Bosh kiyim, quyoshdan saqlovchi ko'zoynak va niqobsiz\n"
+    "• Rasmni <b>siqmasdan</b> ham yuborsangiz bo'ladi (fayl sifatida)\n\n"
+    "⚠️ <b>Ogohlantirish</b>\n"
+    "Agar rasm noaniq bo'lsa yoki unda boshqa odamning yuzi bo'lsa, "
+    "terminal sizni tanimaydi va darsga kelganingizda ham "
+    "<b>«Kelmadi»</b> deb belgilanadi. Bu esa coinlaringizga jiddiy "
+    "ta'sir qiladi.\n\n"
+    "Rasmni shu yerga yuboring 👇"
+)
+
+FACE_SAVED_TEXT = (
+    "✅ <b>Rasm qabul qilindi!</b>\n\n"
+    "Sizning Face ID raqamingiz: <code>{person_id}</code>\n"
+    "Bu raqam faqat sizniki va o'zgarmaydi.\n\n"
+    "Rasm terminalga yozilgach shu yerga xabar keladi. Shundan keyin "
+    "darsga kirganingizda davomat o'zi belgilanadi.\n\n"
+    "Rasmni almashtirmoqchi bo'lsangiz — yangisini yuboravering."
+)
+
+FACE_SYNCED_TEXT = (
+    "🎉 <b>Face ID tayyor!</b>\n\n"
+    "Yuzingiz «{device}» terminaliga yozildi. Endi darsga "
+    "kirganingizda davomatingiz avtomatik belgilanadi.\n\n"
+    "Terminal sizni tanimasa — yuzingizni ekranga yaqinroq tuting va "
+    "bosh kiyimni yeching."
+)
+
+FACE_NOT_LINKED_TEXT = (
+    "Face ID uchun avval botga ulanishingiz kerak.\n"
+    "/start ni bosib telefon raqamingizni yuboring."
+)
+
+FACE_STATUS_TEXT = {
+    "pending": (
+        "🕒 Rasmingiz qabul qilingan, terminalga yozilishi kutilmoqda.\n"
+        "Face ID raqamingiz: <code>{person_id}</code>\n\n"
+        "Rasmni almashtirmoqchi bo'lsangiz yangisini yuboring."
+    ),
+    "synced": (
+        "✅ Face ID ishlayapti.\n"
+        "Face ID raqamingiz: <code>{person_id}</code>\n\n"
+        "Rasmni almashtirmoqchi bo'lsangiz yangisini yuboring."
+    ),
+    "rejected": (
+        "❌ Rasmingiz qabul qilinmadi.\n"
+        "Sabab: {note}\n\n"
+        "Yangi rasm yuboring."
+    ),
+}
+
+
+def handle_face_request(chat_id):
+    """«Face ID» tugmasi — holatni yoki rasm so'rovini ko'rsatadi."""
+    sub = TelegramSubscriber.objects.filter(chat_id=chat_id).first()
+    student = sub.student if sub else None
+    if not student:
+        send_text(chat_id, FACE_NOT_LINKED_TEXT)
+        return
+
+    template = FACE_STATUS_TEXT.get(student.face_status)
+    if template and student.face_photo:
+        send_text(
+            chat_id,
+            template.format(
+                person_id=student.face_person_id or "—",
+                note=student.face_note or "aniqlanmadi",
+            ),
+            reply_markup=student_menu(),
+        )
+        return
+
+    send_text(chat_id, FACE_ASK_TEXT, reply_markup=student_menu())
+
+
+def download_file(file_id):
+    """Telegram serveridan faylni yuklab oladi. Qaytaradi: (baytlar, xato)."""
+    try:
+        info = tg_call("getFile", {"file_id": file_id})
+    except RuntimeError as e:
+        return None, f"Faylni olib bo'lmadi: {e}"
+
+    path = info.get("file_path")
+    if not path:
+        return None, "Fayl manzili topilmadi"
+
+    url = f"https://api.telegram.org/file/bot{settings.TG_BOT_TOKEN}/{path}"
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        return None, f"Faylni yuklab bo'lmadi: {e}"
+    return resp.content, None
+
+
+def _photo_file_id(msg):
+    """Xabardagi rasmning file_id si.
+
+    Rasm ikki xil kelishi mumkin: siqilgan (`photo` — bir nechta
+    o'lchamda, eng kattasini olamiz) yoki fayl sifatida (`document`).
+    Fayl sifatida yuborilgani sifatliroq, shuning uchun uni ham
+    qabul qilamiz — lekin faqat rasm bo'lsa.
+    """
+    photos = msg.get("photo")
+    if photos:
+        largest = max(photos, key=lambda p: p.get("file_size") or 0)
+        return largest.get("file_id"), None
+
+    doc = msg.get("document") or {}
+    mime = str(doc.get("mime_type") or "")
+    if doc.get("file_id"):
+        if not mime.startswith("image/"):
+            return None, (
+                "Bu rasm emas. Yuzingiz tushgan JPG yoki PNG rasm yuboring."
+            )
+        return doc["file_id"], None
+
+    return None, None
+
+
+def handle_face_photo(chat_id, msg):
+    """O'quvchi yuborgan yuz rasmini qabul qiladi.
+
+    Qaytaradi: rasm shu xabarda bo'lgan-bo'lmagani (True bo'lsa xabar
+    shu yerda qayta ishlandi).
+    """
+    file_id, error = _photo_file_id(msg)
+    if error:
+        send_text(chat_id, error)
+        return True
+    if not file_id:
+        return False
+
+    sub = TelegramSubscriber.objects.filter(chat_id=chat_id).first()
+    student = sub.student if sub else None
+    if not student:
+        send_text(chat_id, FACE_NOT_LINKED_TEXT)
+        return True
+
+    raw, error = download_file(file_id)
+    if error:
+        send_text(chat_id, f"❌ {error}\n\nBirozdan keyin qayta urinib ko'ring.")
+        return True
+
+    from . import faceid
+
+    person_id, error = faceid.save_face_photo(student, raw)
+    if error:
+        send_text(chat_id, f"❌ {error}", reply_markup=student_menu())
+        return True
+
+    send_text(
+        chat_id,
+        FACE_SAVED_TEXT.format(person_id=person_id),
+        reply_markup=student_menu(),
+    )
+
+    # Terminal manzili sozlangan bo'lsa darhol yozib qo'yamiz — o'quvchi
+    # kutib turmasin. Sozlanmagan bo'lsa navbatda qoladi va terminal
+    # yonidagi agent uni o'zi olib ketadi.
+    threading.Thread(
+        target=_push_face_now, args=(student.id,), daemon=True
+    ).start()
+    return True
+
+
+def _push_face_now(student_id):
+    """Yangi rasmni ulanishi mumkin bo'lgan terminallarga yozadi."""
+    from . import faceid
+    from .models import FaceDevice
+
+    student = Student.objects.filter(id=student_id).first()
+    if not student:
+        return
+
+    for device in FaceDevice.objects.filter(is_active=True):
+        if not device.can_push:
+            continue
+        # Xato bo'lsa `sync_device` o'quvchiga o'zi xabar beradi
+        done, _failed, _notes = faceid.sync_device(device, [student])
+        if done:
+            for sub in TelegramSubscriber.objects.filter(student=student):
+                try:
+                    send_text(
+                        sub.chat_id, FACE_SYNCED_TEXT.format(device=device.name)
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("Face ID xabari ketmadi (chat=%s)", sub.chat_id)
 
 
 def handle_coin_request(chat_id):
@@ -364,6 +580,11 @@ def handle_update(update):
             )
             return
 
+        # Rasm — Face ID uchun. Telefon tekshiruvidan oldin turadi:
+        # rasmli xabarda matn bo'lmaydi va pastdagi shartlarga tushmaydi.
+        if handle_face_photo(chat_id, msg):
+            return
+
         phone = None
         # Faqat tugma orqali ulashilgan (Telegram tasdiqlagan) o'z raqami
         # bo'lsagina parolni ko'rsatamiz — qo'lda yozilgan begona raqam
@@ -424,6 +645,13 @@ def handle_update(update):
                         "'📱 Telefon raqamni yuborish' tugmasi orqali raqamingizni "
                         "yuboring."
                     )
+                # Yuz rasmi hali yo'q bo'lsa eslatib qo'yamiz — aks holda
+                # tugma bosilmay qolib, davomat qo'lda yozilaverardi
+                if not student.face_photo:
+                    linked_msg += (
+                        "\n\n🪪 Davomat yuzingiz orqali avtomatik belgilanishi "
+                        "uchun «Face ID» tugmasini bosing."
+                    )
                 send_text(chat_id, linked_msg, reply_markup=student_menu())
             elif role == "teacher":
                 send_text(
@@ -451,6 +679,10 @@ def handle_update(update):
 
         if text in ("/coin", "💰 Coinlarim", "/balans"):
             handle_coin_request(chat_id)
+            return
+
+        if text in ("/faceid", "🪪 Face ID", "/face"):
+            handle_face_request(chat_id)
             return
 
         # boshqa har qanday xabar
@@ -584,7 +816,12 @@ def notify_managers(text):
 
 
 def broadcast_product(product):
-    """Yangi mahsulotni botga ulangan o'quvchilarga e'lon qiladi."""
+    """Yangi mahsulotni botga ulangan o'quvchilarga e'lon qiladi.
+
+    Har bir o'quvchiga mahsulot rasmi, nomi va necha coin turishi
+    boradi. Rasm bo'lmasa yoki Telegram uni ololmasa e'lon oddiy matn
+    bo'lib ketaveradi — rasm tufayli xabar umuman bormay qolmasin.
+    """
     price = f"{product.price_coins:,}".replace(",", " ")
     caption = (
         f"🛍 <b>Do'konda yangi mahsulot!</b>\n\n"
@@ -593,18 +830,36 @@ def broadcast_product(product):
     )
     if product.description:
         caption += f"\n\n{product.description[:600]}"
+    caption += "\n\nCoinlaringizni «💰 Coinlarim» tugmasi orqali ko'ring."
+
+    # Telegram faqat to'liq http(s) havoladan rasm ola oladi. Menejer
+    # nisbiy yo'l yoki data: URI yozib qo'ysa sendPhoto har safar xato
+    # beradi — bunday holda darhol matnga o'tamiz.
+    image = (product.image or "").strip()
+    use_photo = image.startswith(("http://", "https://"))
 
     def run():
+        nonlocal use_photo
         subs = TelegramSubscriber.objects.filter(role="student").exclude(
             student__isnull=True
         )
+        sent = 0
         for sub in subs:
             try:
-                if product.image:
-                    send_photo(sub.chat_id, product.image, caption)
+                if use_photo:
+                    try:
+                        send_photo(sub.chat_id, image, caption)
+                    except RuntimeError as e:
+                        # Havola ishlamasa birinchi o'quvchidayoq bilinadi.
+                        # Har biriga qayta urinsak hamma e'lonsiz qolardi.
+                        logger.warning("Mahsulot rasmi yuborilmadi (%s)", e)
+                        use_photo = False
+                        send_text(sub.chat_id, caption)
                 else:
                     send_text(sub.chat_id, caption)
-            except Exception:  # noqa: BLE001
+                sent += 1
+                throttle(sent)
+            except Exception:  # noqa: BLE001 — biri xato bo'lsa qolgani ketsin
                 logger.exception("Mahsulot e'loni ketmadi (chat=%s)", sub.chat_id)
 
     threading.Thread(target=run, daemon=True).start()
@@ -618,6 +873,7 @@ def send_to_leads(text):
         try:
             send_text(sub.chat_id, text)
             sent += 1
+            throttle(sent)
         except Exception:  # noqa: BLE001
             failed += 1
             logger.exception("Leadga xabar ketmadi (chat=%s)", sub.chat_id)
@@ -685,6 +941,7 @@ def send_to_students(students, text, kind, month=""):
             try:
                 send_text(sub.chat_id, body)
                 sent += 1
+                throttle(sent)
                 logs.append(
                     SentMessage(
                         student=student,

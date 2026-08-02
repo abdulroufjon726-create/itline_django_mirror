@@ -25,6 +25,8 @@ urlpatterns = [
     # Terminal shu manzilga hodisa yuboradi — kalit URL ichida,
     # chunki Hikvision qo'shimcha sarlavha yubora olmaydi
     path("faceid/event/<str:secret>/", super_views.faceid_event),
+    # Terminal yonidagi agent yuz navbatini shu manzildan oladi
+    path("faceid/sync/<str:secret>/", super_views.faceid_sync_queue),
     path("presence/ping/", views.presence_ping),
     path("super/online/", super_views.get_online),
     path("super/faceid/devices/", super_views.get_face_devices),
@@ -39,6 +41,20 @@ urlpatterns = [
     path(
         "super/faceid/devices/<int:device_id>/push/<int:student_id>/",
         super_views.push_student_to_device,
+    ),
+    # Botdan kelgan yuz rasmlari
+    path("super/faceid/enrollments/", super_views.get_face_enrollments),
+    path(
+        "super/faceid/enrollments/<int:student_id>/photo/",
+        super_views.get_face_photo,
+    ),
+    path(
+        "super/faceid/enrollments/<int:student_id>/status/",
+        super_views.set_face_status,
+    ),
+    path(
+        "super/faceid/devices/<int:device_id>/sync/",
+        super_views.sync_face_device,
     ),
     path("super/overview/", super_views.get_overview),
     path("super/activity/", super_views.get_activity),

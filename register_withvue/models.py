@@ -159,6 +159,11 @@ class Student(models.Model):
     # Yuz tanish terminalidagi shaxs raqami (Hikvision'da "employee No").
     # Terminal yuzni tanigach shu raqamni yuboradi — biz shu orqali
     # o'quvchini topamiz. Bo'sh bo'lsa o'quvchi terminalga bog'lanmagan.
+    #
+    # Raqam takrorlanmasligi shart: ikki o'quvchida bir xil raqam bo'lsa
+    # terminal kimni tanigani bilinmay qoladi va davomat noto'g'ri odamga
+    # yozilardi. Buni Meta.constraints ta'minlaydi — bo'sh qiymat esa
+    # cheklovdan tashqarida (hali bog'lanmaganlar ko'p bo'ladi).
     face_person_id = models.CharField(
         max_length=32,
         blank=True,
@@ -167,11 +172,48 @@ class Student(models.Model):
         verbose_name="Terminaldagi raqami",
     )
 
+    # ── Botdan kelgan yuz rasmi ──
+    # Rasm bazada base64 (JPEG) ko'rinishida saqlanadi. Fayl tizimi
+    # emas: Render'ning bepul planida disk deploydan keyin tozalanadi va
+    # hamma yuz rasmlari yo'qolib, davomat to'xtab qolardi. Rasm ~30 KB.
+    FACE_STATUS_CHOICES = [
+        ("none", "Rasm yuborilmagan"),
+        ("pending", "Terminalga yozilishi kutilmoqda"),
+        ("synced", "Terminalga yozilgan"),
+        ("rejected", "Rad etilgan"),
+    ]
+
+    face_photo = models.TextField(
+        blank=True, default="", verbose_name="Yuz rasmi (base64 JPEG)"
+    )
+    face_status = models.CharField(
+        max_length=10,
+        choices=FACE_STATUS_CHOICES,
+        default="none",
+        db_index=True,
+        verbose_name="Yuz holati",
+    )
+    face_note = models.CharField(
+        max_length=255, blank=True, default="", verbose_name="Yuz izohi"
+    )
+    # Rasm oxirgi marta qachon almashgani. Terminalga yozilgan sanadan
+    # keyin bo'lsa — o'quvchi yangi rasm yuborgan, qayta yozish kerak.
+    face_updated_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="Rasm yangilangan"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         verbose_name = "O'quvchi"
         verbose_name_plural = "O'quvchilar"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["face_person_id"],
+                condition=~models.Q(face_person_id=""),
+                name="uniq_face_person_id",
+            )
+        ]
 
     def __str__(self):
         return f"{self.name} {self.surname}"
@@ -1220,6 +1262,43 @@ class FaceEvent(models.Model):
 
     def __str__(self):
         return f"{self.person_id} — {self.status}"
+
+
+class FaceSync(models.Model):
+    """Qaysi o'quvchi qaysi terminalga yozilgani.
+
+    Terminal bittadan ko'p bo'lishi mumkin (kirish va chiqish eshigi),
+    shuning uchun "yozildi" degan bayroq o'quvchida emas, shu yerda
+    turadi — bir terminalga yozilgani ikkinchisiga yozilganini
+    anglatmaydi.
+
+    `photo_at` — yozilgan paytdagi `Student.face_updated_at`. O'quvchi
+    yangi rasm yuborsa u sanadan katta bo'lib qoladi va yozuv "eskirgan"
+    hisoblanadi: terminal yangi rasmni qayta oladi.
+    """
+
+    device = models.ForeignKey(
+        FaceDevice, on_delete=models.CASCADE, related_name="syncs"
+    )
+    student = models.ForeignKey(
+        Student, on_delete=models.CASCADE, related_name="face_syncs"
+    )
+
+    photo_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="Yozilgan rasm sanasi"
+    )
+    ok = models.BooleanField(default=True, verbose_name="Muvaffaqiyatli")
+    error = models.CharField(max_length=255, blank=True, verbose_name="Xato")
+    synced_at = models.DateTimeField(auto_now=True, verbose_name="Yozilgan vaqt")
+
+    class Meta:
+        unique_together = ("device", "student")
+        ordering = ["-synced_at"]
+        verbose_name = "Terminalga yozilgan yuz"
+        verbose_name_plural = "Terminalga yozilgan yuzlar"
+
+    def __str__(self):
+        return f"{self.student} → {self.device}"
 
 
 class ActivityLog(models.Model):

@@ -48,8 +48,7 @@ from register_withvue.models import (
     Teacher,
     TelegramSubscriber,
 )
-
-MIN_LEN = 7
+from register_withvue.phones import MIN_KEY_LEN as MIN_LEN, phone_key as key
 
 # (model, o'chiriladigan maydon, bo'shatiladigan qo'shimcha maydon)
 TARGETS = [
@@ -61,12 +60,6 @@ TARGETS = [
     (PhoneVerification, "phone", None),
     (LoginDevice, "phone", None),
 ]
-
-
-def key(phone):
-    """Solishtirish uchun oxirgi 9 raqam."""
-    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
-    return digits[-9:] if len(digits) >= 9 else digits
 
 
 class Command(BaseCommand):

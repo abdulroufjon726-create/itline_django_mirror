@@ -817,30 +817,30 @@ class Command(BaseCommand):
             first = str(r[0]).strip() if r else ""
             if not valid_person_name(first) or extract_phone(first):
                 continue
-            phones, notes = [], []
+            # Raqamlar ajratib olinadi, lekin saqlanmaydi — maqsadi
+            # ularning izohga tushib qolishining oldini olish
+            notes = []
             for c in r[1:]:
                 c = str(c).strip()
                 if not c:
                     continue
-                ph = extract_phone(c)
-                if ph and len(phones) < 2:
-                    phones.append(ph)
+                if extract_phone(c):
                     continue
                 notes.append(c)
             clean_name, name_extras = clean_person_name(first)
             if len(clean_name.replace(" ", "")) < 3:
                 continue
             name, surname = split_name(clean_name)
-            primary = phones[0] if phones else ""
-            stored_phone = self._uniq_student_phone(primary)
-            extra = phones[1] if len(phones) > 1 else ""
-            if primary and stored_phone != primary:
-                extra = primary
+            # Bitiruvchidan faqat ism-familiya qoladi. Ular o'qishni
+            # tugatgan — raqamlari kerak emas, lekin bazada turgani uchun
+            # o'sha odam qaytib kelganda "raqam allaqachon band" bo'lib
+            # ro'yxatdan o'ta olmasdi. Telefon NULL: unikal indeks
+            # NULL'larni cheklamaydi, shuning uchun hammasi bo'sh tura oladi.
             Student.objects.create(
                 name=name[:100],
                 surname=surname[:100],
-                phone=stored_phone,
-                phone2=extra[:50],
+                phone=None,
+                phone2="",
                 is_graduate=True,
                 note=" · ".join(notes + name_extras),
                 source=SOURCE,

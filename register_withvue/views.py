@@ -40,6 +40,7 @@ from .models import (
 from django.utils import timezone
 from django.conf import settings
 from rest_framework import generics, permissions
+from .phones import forget_student_phones
 from .serializers import NewsSerializer
 from .access import (
     DEFAULT_PERMISSIONS,
@@ -1416,7 +1417,7 @@ def get_students_overview(request):
                 "surname": s.surname,
                 # Import paytida raqami band bo'lgan o'quvchilarga '—0001'
                 # kabi shartli kod berilgan — uni ko'rsatmaymiz
-                "phone": "" if s.phone.startswith("—") else s.phone,
+                "phone": "" if (s.phone or "").startswith("—") else (s.phone or ""),
                 "phone2": s.phone2,
                 "teacher_id": s.teacher_id,
                 "teacher_name": s.teacher.name if s.teacher else "",
@@ -1432,9 +1433,44 @@ def get_students_overview(request):
             }
             for s in rows
         ]
-        return JsonResponse({"count": len(data), "students": data})
+        return JsonResponse(
+            {
+                "count": len(data),
+                "students": data,
+                "hidden": _hidden_phone_holders(search) if search and not data else [],
+            }
+        )
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
+
+
+def _hidden_phone_holders(search):
+    """Qidiruvda ko'rinmaydigan, lekin raqamni band qilib turgan yozuvlar.
+
+    Bu ro'yxat uchta filtrni chetlab o'tadi: ustozning admin profili,
+    menejerning profili va bitiruvchi. Ular ro'yxatda ko'rsatilmaydi,
+    lekin login va ro'yxatdan o'tkazish ularni KO'RADI — ya'ni menejer
+    "hech narsa topilmadi" deb turganda bot "bu raqam bazada bor"
+    deyishi mumkin edi. Sababini aytmasak, izlash imkonsiz.
+    """
+    key = _phone_key(search)
+    if len(key) < MIN_PHONE_KEY_LEN:
+        return []
+
+    out = []
+    for s in Student.objects.filter(is_graduate=True):
+        if key in (_phone_key(s.phone), _phone_key(s.phone2)):
+            out.append({"id": s.id, "name": f"{s.name} {s.surname}".strip(),
+                        "kind": "bitiruvchi"})
+    for s in Student.objects.filter(is_admin=True):
+        if key in (_phone_key(s.phone), _phone_key(s.phone2)):
+            out.append({"id": s.id, "name": f"{s.name} {s.surname}".strip(),
+                        "kind": "ustoz profili"})
+    for s in Student.objects.filter(is_excellence=True):
+        if key in (_phone_key(s.phone), _phone_key(s.phone2)):
+            out.append({"id": s.id, "name": f"{s.name} {s.surname}".strip(),
+                        "kind": "menejer profili"})
+    return out
 
 
 @csrf_exempt
@@ -1599,7 +1635,7 @@ def get_students(request):
                 "id": s.id,
                 "name": s.name,
                 "surname": s.surname,
-                "phone": "" if s.phone.startswith("—") else s.phone,
+                "phone": "" if (s.phone or "").startswith("—") else (s.phone or ""),
                 "phone2": s.phone2,
                 "teacher_id": s.teacher_id,
                 "teacher_name": s.teacher.name if s.teacher else "Biriktirilmagan",
@@ -5571,7 +5607,7 @@ def get_graduates(request):
                 "id": s.id,
                 "name": s.name,
                 "surname": s.surname,
-                "phone": s.phone if not s.phone.startswith("—") else "",
+                "phone": "" if (s.phone or "").startswith("—") else (s.phone or ""),
                 "phone2": s.phone2,
                 "teacher_name": s.teacher.name if s.teacher else "",
                 "note": s.note,
@@ -5938,7 +5974,14 @@ def delete_student(request, student_id):
             return JsonResponse({"error": "O'quvchi topilmadi"}, status=404)
         name = f"{student.name} {student.surname}".strip()
         teacher_name = student.teacher.name if student.teacher else ""
+        # Raqamlarni o'chirishdan OLDIN olamiz — keyin obyektdan o'qib
+        # bo'lmaydi
+        phones = [student.phone, student.phone2]
         student.delete()
+        # O'quvchi qatori ketdi, lekin bot ulanishi, tasdiqlash kodi va
+        # qurilma yozuvlari raqam bilan qolib ketardi (FK'lar SET_NULL) —
+        # menejer "o'chirdim" desa ham raqam bazada yashirin turardi
+        forget_student_phones([student_id], phones)
         log_action(
             request,
             "student.delete",
@@ -5985,7 +6028,9 @@ def bulk_delete_students(request):
         deleted = qs.count()
         if not deleted:
             return JsonResponse({"error": "O'quvchi topilmadi"}, status=404)
+        phones = [p for s in qs for p in (s.phone, s.phone2)]
         qs.delete()
+        forget_student_phones(ids, phones)
         return JsonResponse({"success": True, "deleted": deleted})
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)

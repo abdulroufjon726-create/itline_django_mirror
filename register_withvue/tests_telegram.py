@@ -1,11 +1,12 @@
 """Telegram bot oqimi uchun testlar (tuzatilgan xatolarni qo'riqlaydi)."""
 
+import json
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import Client, TestCase
 
 from . import telegram as tg
-from .models import Student, TelegramSubscriber
+from .models import PaymentRequest, Student, TelegramSubscriber
 
 
 class HandleUpdateTests(TestCase):
@@ -113,6 +114,67 @@ class SendTextHtmlTests(TestCase):
         with self.assertRaises(RuntimeError):
             tg.send_text(1, "Salom")
         self.assertEqual(tg_call.call_count, 1)
+
+
+class ReceiptOnRequestAcceptTests(TestCase):
+    """Regressiya: so'rov qabul qilinganda o'quvchiga chek ketmasdi."""
+
+    def setUp(self):
+        self.student = Student.objects.create(
+            name="Ali", surname="Valiyev", phone="+998901234567"
+        )
+        self.pr = PaymentRequest.objects.create(
+            student=self.student, receipt_b64="data:image/png;base64,xxx"
+        )
+
+    def _accept(self, amount=300000):
+        return Client().patch(
+            f"/api/payment-requests/{self.pr.id}/accept/",
+            data=json.dumps({"amount": amount, "month": "2026-08"}),
+            content_type="application/json",
+        )
+
+    @patch("register_withvue.telegram.send_receipt")
+    def test_accepting_a_request_sends_the_receipt(self, send_receipt):
+        res = self._accept()
+
+        self.assertEqual(res.status_code, 200)
+        self.pr.refresh_from_db()
+        self.assertEqual(self.pr.status, "accepted")
+        self.assertEqual(send_receipt.call_count, 1, "chek yuborilmadi")
+
+    @patch("register_withvue.telegram.send_receipt")
+    def test_receipt_shows_the_amount_paid_this_time(self, send_receipt):
+        """{summa} oy bo'yicha jami emas, shu safar tushgani bo'lishi kerak."""
+        self._accept(amount=300000)
+        self.assertEqual(send_receipt.call_args.kwargs["amount"], 300000)
+
+    @patch("register_withvue.telegram.send_receipt")
+    def test_already_resolved_request_sends_nothing(self, send_receipt):
+        self.pr.status = "rejected"
+        self.pr.save()
+
+        res = self._accept()
+
+        self.assertEqual(res.status_code, 400)
+        send_receipt.assert_not_called()
+
+
+class BuildReceiptTests(TestCase):
+    def test_amount_defaults_to_the_month_total(self):
+        """`amount` berilmasa eski xatti-harakat saqlanadi."""
+        student = Student.objects.create(
+            name="Ali", surname="Valiyev", phone="+998901234567"
+        )
+        payment = type(
+            "P", (), {
+                "student": student, "month": "2026-08", "amount_due": 600000,
+                "discount": 0, "paid_amount": 450000,
+            },
+        )()
+
+        self.assertIn("450 000", tg.build_receipt(payment))
+        self.assertIn("200 000", tg.build_receipt(payment, amount=200000))
 
 
 class TgCallTests(TestCase):

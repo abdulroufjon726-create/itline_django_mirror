@@ -488,8 +488,14 @@ def _month_label(month):
         return month or ""
 
 
-def build_receipt(payment):
-    """To'lov cheki matnini sozlamadagi shablondan tuzadi."""
+def build_receipt(payment, amount=None):
+    """To'lov cheki matnini sozlamadagi shablondan tuzadi.
+
+    `amount` — shu safar tushgan summa. Berilmasa oy bo'yicha jami
+    to'langan olinadi. Farqi bo'linib to'langanda bilinadi: {summa}
+    "shu safar" degani (PLACEHOLDERS'da shunday yozilgan), {qolgan}
+    esa oyning umumiy qoldig'i.
+    """
     from django.utils import timezone
 
     from .models import ReceiptSettings
@@ -500,11 +506,12 @@ def build_receipt(payment):
 
     due = max(0, (payment.amount_due or 0) - (payment.discount or 0))
     paid = payment.paid_amount or 0
+    this_time = paid if amount is None else amount
 
     values = {
         "{ism}": f"{student.name} {student.surname}".strip() if student else "",
         "{oy}": _month_label(payment.month),
-        "{summa}": _money(paid),
+        "{summa}": _money(this_time),
         "{jami}": _money(due),
         "{qolgan}": _money(max(0, due - paid)),
         "{sana}": timezone.localdate().strftime("%d.%m.%Y"),
@@ -518,7 +525,7 @@ def build_receipt(payment):
     return text
 
 
-def send_receipt(payment):
+def send_receipt(payment, amount=None):
     """To'lov tasdiqlangach o'quvchiga chek yuboradi.
 
     Fon oqimida — menejer tugmani bosgach panel Telegramni kutib
@@ -532,7 +539,7 @@ def send_receipt(payment):
     if not payment.student_id:
         return
 
-    text = build_receipt(payment)
+    text = build_receipt(payment, amount)
     student_id = payment.student_id
 
     def run():

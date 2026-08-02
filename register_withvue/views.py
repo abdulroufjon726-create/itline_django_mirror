@@ -3118,7 +3118,11 @@ def confirm_payment(request, payment_id):
             try:
                 from . import telegram as tg
 
-                tg.send_receipt(payment)
+                # {summa} — "shu safar to'langan". Oldin oy bo'yicha
+                # jami ketardi: bo'lib to'laganda o'quvchi o'zi
+                # o'tkazmagan summani ko'rardi.
+                added = (payment.paid_amount or 0) - (paid_amount_before or 0)
+                tg.send_receipt(payment, amount=added if added > 0 else None)
             except Exception:  # noqa: BLE001 — chek to'lovni to'smasin
                 logging.getLogger(__name__).exception("Chek yuborilmadi")
 
@@ -3485,6 +3489,23 @@ def accept_payment_request(request, req_id):
             month=month,
             amount=amount,
         )
+
+        # O'quvchi chekni o'zi yuborgan va menejer uni tasdiqladi —
+        # javoban unga to'lov cheki boradi. Qo'lda tasdiqlashda
+        # (update_payment) shunday bo'ladi, bu yo'lda esa tushib
+        # qolgan edi: so'rov qabul qilinardi, lekin o'quvchi hech
+        # qanday tasdiq olmasdi.
+        #
+        # Bu yerda "to'liq to'landimi" degan shart yo'q: o'quvchi pul
+        # o'tkazgan bo'lsa, oy yopilmasa ham chek olishi kerak —
+        # {summa} shu safar tushganini, {qolgan} qolgan qarzni
+        # ko'rsatadi.
+        try:
+            from . import telegram as tg
+
+            tg.send_receipt(payment, amount=amount)
+        except Exception:  # noqa: BLE001 — chek javobni to'smasin
+            logging.getLogger(__name__).exception("Chek yuborilmadi")
 
         wallet = compute_wallet(student)
         return JsonResponse(

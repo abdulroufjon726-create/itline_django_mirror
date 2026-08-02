@@ -138,11 +138,66 @@ def tg_call(method, payload, timeout=15):
     return data["result"]
 
 
+# Telegram HTML rejimida tushunadigan teglar. Ro'yxatda yo'q narsa
+# oddiy matn bo'lib chiqadi — ya'ni tasodifiy `<div>` xabarni buzmaydi.
+_ALLOWED_TAGS = ("b", "strong", "i", "em", "u", "s", "code", "pre")
+
+_TAG_RE = re.compile(
+    r"&lt;(/?)(" + "|".join(_ALLOWED_TAGS) + r")&gt;", re.IGNORECASE
+)
+
+
+def html_safe(text):
+    """Matnni Telegram HTML rejimi uchun tayyorlaydi.
+
+    Avval hamma narsa qochiriladi, keyin faqat ruxsat etilgan teglar
+    qaytariladi. Shu tartib muhim: menejer yozgan "5 < 6" kabi matn
+    ham, ismdagi `&` belgisi ham xabarni buzmaydi, lekin shablondagi
+    <b> qalin bo'lib chiqadi.
+    """
+    escaped = (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    return _TAG_RE.sub(lambda m: f"<{m.group(1)}{m.group(2).lower()}>", escaped)
+
+
+def _parse_error(exc):
+    """Telegram xatosi teg tahliliga tegishlimi."""
+    msg = str(exc).lower()
+    return "parse" in msg or "entit" in msg or "tag" in msg
+
+
 def send_text(chat_id, text, reply_markup=None):
-    payload = {"chat_id": chat_id, "text": text}
+    """Xabar yuboradi. Matn HTML sifatida o'qiladi (<b>, <i>, <code> ...).
+
+    parse_mode berilmasa Telegram teglarni matn deb qabul qiladi —
+    chek va bildirishnomalarda `<b>` xuddi shunday, ochiq teg ko'rinishida
+    chiqib qolardi.
+    """
+    payload = {
+        "chat_id": chat_id,
+        "text": html_safe(text),
+        "parse_mode": "HTML",
+        # Havola bo'lsa ostiga katta ko'rinish bloki qo'shilib chek
+        # ko'rinishini buzardi
+        "disable_web_page_preview": True,
+    }
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
-    return tg_call("sendMessage", payload)
+    try:
+        return tg_call("sendMessage", payload)
+    except RuntimeError as e:
+        if not _parse_error(e):
+            raise
+        # Kutilmagan teg uchrasa xabar umuman ketmay qolgandan ko'ra
+        # oddiy matn bo'lib ketgani yaxshi
+        logger.warning("HTML rad etildi, oddiy matn bilan yuborildi: %s", e)
+        payload.pop("parse_mode")
+        payload["text"] = text
+        return tg_call("sendMessage", payload)
 
 
 def last9(phone):
@@ -495,7 +550,9 @@ def send_photo(chat_id, photo_url, caption=""):
     """Rasm yuboradi. Rasm URL bo'lishi kerak (mahsulot rasmi shunday)."""
     payload = {"chat_id": chat_id, "photo": photo_url, "parse_mode": "HTML"}
     if caption:
-        payload["caption"] = caption[:1024]
+        # Avval qisqartiramiz, keyin qochiramiz — teskarisida teg
+        # o'rtasidan kesilib qolishi mumkin edi
+        payload["caption"] = html_safe(caption[:1000])
     return tg_call("sendPhoto", payload)
 
 

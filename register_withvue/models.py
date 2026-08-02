@@ -374,16 +374,30 @@ class ReceiptSettings(models.Model):
         ("{guruh}", "O'quvchining guruhi"),
     ]
 
+    # Chek haqiqiy kassa chekiga o'xshab tursin: sarlavha, ajratuvchi
+    # chiziqlar, so'ngida "qabul qilindi" muhri. Summalar <code> ichida —
+    # Telegram uni bir xil kenglikdagi shrift bilan chizadi, shu sababli
+    # raqamlar ustma-ust tik turadi.
+    _LINE = "━━━━━━━━━━━━━━━━━━━━"
+
     DEFAULT_TEMPLATE = (
-        "🧾 <b>To'lov cheki</b>\n\n"
-        "Hurmatli {ism}!\n"
-        "{oy} oyi uchun to'lovingiz qabul qilindi.\n\n"
-        "To'langan: <b>{summa}</b>\n"
-        "Oylik to'lov: {jami}\n"
-        "Qolgan: {qolgan}\n"
-        "Sana: {sana}\n\n"
+        f"🧾 <b>TO'LOV CHEKI</b>\n"
+        f"<code>{_LINE}</code>\n"
+        "👤 <b>{ism}</b>\n"
+        "👥 Guruh: {guruh}\n"
+        "📅 Davr: {oy}\n"
+        f"<code>{_LINE}</code>\n"
+        "To'landi\n"
+        "   💵 <b>{summa}</b>\n"
+        "Oylik to'lov\n"
+        "   <code>{jami}</code>\n"
+        "Qolgan qarz\n"
+        "   <code>{qolgan}</code>\n"
+        f"<code>{_LINE}</code>\n"
+        "✅ <b>To'lov qabul qilindi</b>\n"
+        "🗓 {sana}\n\n"
         "Rahmat! 🙏\n"
-        "{markaz}"
+        "<i>{markaz}</i>"
     )
 
     enabled = models.BooleanField(

@@ -182,3 +182,15 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.WARNING(f"  {label} #{obj.pk} ({obj}) — o'chiriladi{tail}")
             )
+            # Jadvaldan kelgan yozuv o'chirilsa ham qaytib keladi:
+            # har deployda load_sheet_data source="sheet" larni o'chirib
+            # jadvaldan qayta yaratadi. Buni bilmasa odam o'chirdim deb
+            # o'ylab yuradi, keyingi deployda esa raqam yana paydo bo'ladi.
+            if getattr(obj, "source", "") == "sheet":
+                self.stdout.write(
+                    self.style.ERROR(
+                        "      ⚠ bu yozuv Google Sheets'dan kelgan — keyingi "
+                        "deployda qayta yaratiladi. Raqamni JADVALDAN ham "
+                        "o'chiring, aks holda tozalash vaqtinchalik bo'ladi."
+                    )
+                )

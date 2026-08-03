@@ -626,7 +626,9 @@ def _enrollment_row(student, sync_by_student):
         "status_label": student.get_face_status_display(),
         "note": student.face_note,
         "updated_at": student.face_updated_at,
-        "has_photo": bool(student.face_photo),
+        # Ro'yxat rasmi borlar bo'yicha filtrlangan — qayta tekshirish
+        # uchun 200 KB lik maydonni o'qish shart emas
+        "has_photo": True,
         "synced_at": sync.synced_at if sync and sync.ok else None,
         "sync_error": sync.error if sync and not sync.ok else "",
     }
@@ -643,10 +645,12 @@ def get_face_enrollments(request):
     if denied:
         return denied
 
+    # Rasmning o'zi bu ro'yxatda kerak emas — `defer` bo'lmasa har bir
+    # yozuv bilan 200 KB o'qilardi
     students = list(
-        Student.objects.exclude(face_photo="").order_by(
-            "face_status", "-face_updated_at"
-        )
+        Student.objects.exclude(face_photo="")
+        .defer("face_photo")
+        .order_by("face_status", "-face_updated_at")
     )
 
     device_id = request.GET.get("device")
@@ -837,6 +841,12 @@ def faceid_sync_queue(request, secret):
             limit = 20
 
         pending = faceid.pending_students(device)
+        # Rasm faqat shu safar yuboriladiganlarga kerak — butun navbatni
+        # rasmlari bilan o'qish javobni ham, xotirani ham shishirardi
+        batch = Student.objects.filter(
+            id__in=[s.id for s in pending[:limit]]
+        ).order_by("id")
+
         return JsonResponse(
             {
                 "device": device.name,
@@ -848,7 +858,7 @@ def faceid_sync_queue(request, secret):
                         "photo": s.face_photo,
                         "updated_at": s.face_updated_at,
                     }
-                    for s in pending[:limit]
+                    for s in batch
                 ],
             }
         )

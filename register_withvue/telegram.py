@@ -273,6 +273,12 @@ FACE_NOT_LINKED_TEXT = (
     "/start ni bosib telefon raqamingizni yuboring."
 )
 
+# Ustoz/menejer ham rasm yuborishi mumkin. Ularga "ulanmagansiz" deyish
+# chalkash bo'lardi — ular ulangan, shunchaki Face ID ularga tegishli emas.
+FACE_NOT_STUDENT_TEXT = (
+    "Face ID tizimi o'quvchilar uchun — davomat shu orqali belgilanadi."
+)
+
 FACE_STATUS_TEXT = {
     "pending": (
         "🕒 Rasmingiz qabul qilingan, terminalga yozilishi kutilmoqda.\n"
@@ -292,12 +298,21 @@ FACE_STATUS_TEXT = {
 }
 
 
+def _face_student(chat_id):
+    """Shu chat qaysi o'quvchiniki. Qaytaradi: (o'quvchi, xato_matni)."""
+    sub = TelegramSubscriber.objects.filter(chat_id=chat_id).first()
+    if sub and sub.student:
+        return sub.student, None
+    if sub and sub.role in ("teacher", "manager", "lead"):
+        return None, FACE_NOT_STUDENT_TEXT
+    return None, FACE_NOT_LINKED_TEXT
+
+
 def handle_face_request(chat_id):
     """«Face ID» tugmasi — holatni yoki rasm so'rovini ko'rsatadi."""
-    sub = TelegramSubscriber.objects.filter(chat_id=chat_id).first()
-    student = sub.student if sub else None
-    if not student:
-        send_text(chat_id, FACE_NOT_LINKED_TEXT)
+    student, error = _face_student(chat_id)
+    if error:
+        send_text(chat_id, error)
         return
 
     template = FACE_STATUS_TEXT.get(student.face_status)
@@ -373,10 +388,9 @@ def handle_face_photo(chat_id, msg):
     if not file_id:
         return False
 
-    sub = TelegramSubscriber.objects.filter(chat_id=chat_id).first()
-    student = sub.student if sub else None
-    if not student:
-        send_text(chat_id, FACE_NOT_LINKED_TEXT)
+    student, error = _face_student(chat_id)
+    if error:
+        send_text(chat_id, error)
         return True
 
     raw, error = download_file(file_id)

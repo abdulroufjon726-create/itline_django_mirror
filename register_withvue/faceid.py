@@ -442,12 +442,16 @@ def save_face_photo(student, raw):
     return person_id, None
 
 
-def pending_students(device=None):
+def pending_students(device=None, with_photo=False):
     """Terminalga yozilishi kerak bo'lgan o'quvchilar.
 
     Rasmi bor va rad etilmagan har bir o'quvchi shu ro'yxatga tushadi;
     `device` berilsa faqat o'sha terminalga hali yozilmaganlari yoki
     yozilganidan keyin rasmini almashtirganlari qoladi.
+
+    Rasmning o'zi so'ralmaguncha yuklanmaydi: har biri ~200 KB va
+    ro'yxat ko'pincha faqat sanash uchun kerak bo'ladi — hammasini
+    o'qish yuzlab o'quvchida serverni xotiraga cho'ktirardi.
     """
     qs = (
         Student.objects.exclude(face_photo="")
@@ -455,6 +459,8 @@ def pending_students(device=None):
         .exclude(face_status="rejected")
         .order_by("id")
     )
+    if not with_photo:
+        qs = qs.defer("face_photo")
     if device is None:
         return list(qs)
 
@@ -512,7 +518,7 @@ def sync_device(device, students=None, notify=True):
         return 0, 0, ["Terminal manzili sozlanmagan"]
 
     if students is None:
-        students = pending_students(device)
+        students = pending_students(device, with_photo=True)
 
     done = failed = 0
     notes = []

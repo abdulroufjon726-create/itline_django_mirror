@@ -164,6 +164,15 @@ class QueueTests(TestCase):
         pending = faceid.pending_students(self.device)
         self.assertEqual([s.id for s in pending], [self.student.id])
 
+    def test_queue_defers_photo_but_sync_still_gets_it(self):
+        """Ro'yxat rasmsiz o'qiladi (xotira uchun) — yozishda esa kerak."""
+        light = faceid.pending_students(self.device)[0]
+        self.assertIn("face_photo", light.get_deferred_fields())
+
+        heavy = faceid.pending_students(self.device, with_photo=True)[0]
+        self.assertNotIn("face_photo", heavy.get_deferred_fields())
+        self.assertTrue(heavy.face_photo)
+
     def test_rejected_student_is_not_queued(self):
         self.student.face_status = "rejected"
         self.student.save(update_fields=["face_status"])
@@ -393,6 +402,24 @@ class BotPhotoTests(TestCase):
         self.assertIn(self.student.face_person_id, send_text.call_args[0][1])
 
     @patch.object(tg, "send_text")
+    @patch.object(tg, "download_file")
+    def test_teacher_photo_gets_a_clear_answer(self, download, send_text):
+        """Ustozga «ulanmagansiz» deyish chalkash — u ulangan."""
+        from .models import Teacher
+
+        teacher = Teacher.objects.create(name="Ustoz", phone="+998907654321")
+        TelegramSubscriber.objects.create(
+            chat_id=444, teacher=teacher, role="teacher", phone="907654321"
+        )
+
+        tg.handle_update(self._photo_update(chat_id=444))
+
+        download.assert_not_called()
+        body = send_text.call_args[0][1]
+        self.assertIn("o'quvchilar uchun", body)
+        self.assertNotIn("/start", body)
+
+    @patch.object(tg, "send_text")
     def test_non_image_document_is_refused(self, send_text):
         tg.handle_update(
             {
@@ -404,6 +431,107 @@ class BotPhotoTests(TestCase):
             }
         )
         self.assertIn("rasm emas", send_text.call_args[0][1].lower())
+
+
+class EndToEndTests(TestCase):
+    """Butun zanjir: bot rasmi → raqam → terminal → avtomatik davomat."""
+
+    def setUp(self):
+        self.client = Client()
+        self.device = FaceDevice.objects.create(name="Kirish", secret="e2e")
+        self.student = Student.objects.create(
+            name="Ali", surname="Valiyev", phone="+998901234567"
+        )
+        TelegramSubscriber.objects.create(
+            chat_id=555, student=self.student, role="student", phone="901234567"
+        )
+
+        from .models import Group
+
+        # Bugun darsi bo'lishi uchun har kuni o'qiydigan guruh
+        self.group = Group.objects.create(
+            name="Python-1", schedule="daily", lesson_time="09:00"
+        )
+        self.group.students.add(self.student)
+
+    @patch.object(tg, "_push_face_now")
+    @patch.object(tg, "send_text")
+    @patch.object(tg, "download_file")
+    def test_photo_to_attendance(self, download, _send_text, _push):
+        from .models import Attendance
+
+        # ① O'quvchi botga rasm yuboradi
+        download.return_value = (make_image(800, 600), None)
+        tg.handle_update(
+            {
+                "message": {
+                    "chat": {"id": 555, "first_name": "Ali"},
+                    "from": {"id": 777},
+                    "photo": [{"file_id": "big", "file_size": 9000}],
+                }
+            }
+        )
+
+        self.student.refresh_from_db()
+        person_id = self.student.face_person_id
+        self.assertTrue(person_id, "raqam berilmadi")
+
+        # ② Terminal yonidagi agent navbatni oladi
+        queue = self.client.get("/api/faceid/sync/e2e/").json()
+        self.assertEqual(queue["total"], 1)
+        self.assertEqual(queue["students"][0]["person_id"], person_id)
+
+        # ③ Agent yozib bo'lgach natijani qaytaradi
+        self.client.post(
+            "/api/faceid/sync/e2e/",
+            data=json.dumps({"results": [{"person_id": person_id, "ok": True}]}),
+            content_type="application/json",
+        )
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.face_status, "synced")
+
+        # ④ Terminal yuzni tanib hodisa yuboradi
+        res = self.client.post(
+            "/api/faceid/event/e2e/",
+            data=json.dumps(
+                {
+                    "dateTime": timezone.localtime().isoformat(),
+                    "AccessControllerEvent": {
+                        "majorEventType": 5,
+                        "subEventType": 75,
+                        "employeeNoString": person_id,
+                        "name": "Ali",
+                    },
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(res.json()["status"], "marked")
+
+        # ⑤ Davomat belgilangan bo'lishi kerak
+        attendance = Attendance.objects.get(student=self.student)
+        self.assertIn(attendance.status, ("present", "late"))
+
+    def test_unknown_number_does_not_mark_anyone(self):
+        """Begona raqam hech kimning davomatiga tegmasligi kerak."""
+        from .models import Attendance
+
+        res = self.client.post(
+            "/api/faceid/event/e2e/",
+            data=json.dumps(
+                {
+                    "dateTime": timezone.localtime().isoformat(),
+                    "AccessControllerEvent": {
+                        "majorEventType": 5,
+                        "subEventType": 75,
+                        "employeeNoString": "99999",
+                    },
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(res.json()["status"], "unknown")
+        self.assertEqual(Attendance.objects.count(), 0)
 
 
 class ProductBroadcastTests(TestCase):

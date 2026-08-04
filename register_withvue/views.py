@@ -1985,38 +1985,6 @@ def register_student(request):
         is_admin = admin_password == ADMIN_PASSWORD
         is_excellence = excellence_password == EXCELLENCE_PASSWORD
 
-        # Oddiy o'quvchi uchun telefon bot orqali tasdiqlangan bo'lishi shart.
-        # Admin/excellence qo'shishda tasdiqlash talab qilinmaydi.
-        if not is_admin and not is_excellence:
-            from datetime import timedelta
-
-            from .models import PhoneVerification
-
-            deadline = timezone.now() - timedelta(minutes=30)
-            pv = (
-                PhoneVerification.objects.filter(
-                    phone=_digits9(phone),
-                    verified_at__isnull=False,
-                    used_at__isnull=True,
-                    verified_at__gte=deadline,
-                )
-                .order_by("-verified_at")
-                .first()
-            )
-            if not pv:
-                return JsonResponse(
-                    {
-                        "error": (
-                            "Telefon raqam tasdiqlanmagan. "
-                            "Avval bot orqali kod yuborib tasdiqlang."
-                        ),
-                        "need_verification": True,
-                    },
-                    status=403,
-                )
-            pv.used_at = timezone.now()
-            pv.save(update_fields=["used_at"])
-
         teacher = None
         if not is_admin and not is_excellence:
             teacher_id = data.get("teacher_id")

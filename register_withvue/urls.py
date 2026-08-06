@@ -251,6 +251,12 @@ urlpatterns = [
     path("expenses/<int:expense_id>/update/", views.update_expense),
     path("expenses/<int:expense_id>/delete/", views.delete_expense),
     path("finance-summary/", views.get_finance_summary),
+    # KASSA — kunlik smena + oylik hisobot
+    path("cash/current/", views.get_cash_current),
+    path("cash/close/", views.close_cash_session),
+    path("cash/sessions/", views.get_cash_sessions),
+    path("cash/settings/", views.get_cash_settings),
+    path("cash/settings/update/", views.update_cash_settings),
 ]
 
 app_name = "register_withvue"

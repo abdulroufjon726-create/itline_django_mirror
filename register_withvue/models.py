@@ -1372,3 +1372,195 @@ class LessonReminderLog(models.Model):
 
     def __str__(self):
         return f"{self.group} — {self.date}"
+
+
+# ─────────────────────────────────────────
+# KASSA (kunlik smena + tranzaksiya jurnali)
+# ─────────────────────────────────────────
+#
+# Muammo: `Payment.paid_amount` — bitta o'zgaruvchan maydon. Kassir bir
+# kuni 200 000 kiritib kassani topshiradi, ertasi o'sha maydonni 400 000
+# qilib o'zgartirsa — bugun +200 000 tushgani hech qayerda yozilmaydi va
+# kunlik topshiruv noto'g'ri chiqadi.
+#
+# Yechim: har pul harakati o'chirilmaydigan `CashEntry` sifatida
+# yoziladi (ActivityLog kabi — obyekt o'chsa ham qoladi). To'lov
+# tahrirlanganda maydon ustiga yozilmaydi, FARQ (delta) yangi yozuv
+# bo'lib bugungi ochiq smenaga tushadi. Kunlik smena `CashSession` —
+# kassir kun oxirida fizik pulni sanab topshiradi, tizim kutilgan bilan
+# solishtiradi. Yopilgan smena qulflanadi; keyingi to'lov yangi smena
+# ochadi, kechagi topshirilgan hisob buzilmaydi.
+
+
+class CashRegisterSettings(models.Model):
+    """Kassa tizimining supermenejer sozlamasi (singleton).
+
+    Supermenejer butun modulni o'chirib-yoqa oladi. O'chirilganda kunlik
+    smena/topshiruv ishlamaydi (eski tartib), lekin jurnal baribir
+    yoziladi — keyin yoqilsa tarix to'liq bo'lsin.
+    """
+
+    enabled = models.BooleanField(
+        default=True, verbose_name="Kunlik kassa yoqilgan"
+    )
+    # Topshirishda kassir fizik sanagan pulni kiritishi majburiymi
+    require_counted = models.BooleanField(
+        default=True, verbose_name="Fizik sanoq majburiy"
+    )
+    # Topshirilgan smena qulflansinmi (undagi yozuvlar o'zgarmasin)
+    lock_after_close = models.BooleanField(
+        default=True, verbose_name="Topshirilgan smena qulflanadi"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Kassa sozlamasi"
+        verbose_name_plural = "Kassa sozlamalari"
+
+    def __str__(self):
+        return "Kassa yoqilgan" if self.enabled else "Kassa o'chirilgan"
+
+    @classmethod
+    def get_settings(cls):
+        obj, _created = cls.objects.get_or_create(pk=1)
+        return obj
+
+
+class CashSession(models.Model):
+    """Bir kunlik umumiy kassa (smena).
+
+    Kassa bitta — barcha to'lovlar bitta accountdan kiritiladi. Har
+    kunga bitta smena (date unikal). Kunning birinchi to'lovida
+    avtomatik ochiladi, har kuni o'zi yangilanadi. Kassir kun oxirida
+    fizik pulni sanab topshiradi; har kun tarixda alohida qator bo'lib
+    qoladi. Topshirilgandan keyin o'sha kuni yana pul tushsa smena qayta
+    ochiladi (kun tugamaguncha yakuniy emas)."""
+
+    STATUS_OPEN = "open"
+    STATUS_CLOSED = "closed"
+    STATUS_CHOICES = [
+        (STATUS_OPEN, "Ochiq"),
+        (STATUS_CLOSED, "Topshirilgan"),
+    ]
+
+    cashier = models.ForeignKey(
+        Manager,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="cash_sessions",
+        verbose_name="Kassir",
+    )
+    # Oxirgi amalni bajargan kassir (kim topshirgani ko'rinib tursin)
+    cashier_name = models.CharField(max_length=200, blank=True)
+
+    # Toshkent sanasi — har kunga bitta smena
+    date = models.DateField(unique=True, db_index=True, verbose_name="Sana")
+    status = models.CharField(
+        max_length=10, choices=STATUS_CHOICES, default=STATUS_OPEN, db_index=True
+    )
+
+    opened_at = models.DateTimeField(auto_now_add=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+
+    # Topshirish paytida muhrlanadigan qiymatlar
+    expected_total = models.IntegerField(
+        default=0, verbose_name="Tizim hisobi"
+    )
+    counted_total = models.IntegerField(
+        null=True, blank=True, verbose_name="Sanalgan pul"
+    )
+    # counted - expected: manfiy = kamomad, musbat = ortiqcha
+    difference = models.IntegerField(default=0, verbose_name="Farq")
+    note = models.CharField(max_length=255, blank=True, verbose_name="Izoh")
+
+    class Meta:
+        ordering = ["-date", "-opened_at"]
+        verbose_name = "Kassa smenasi"
+        verbose_name_plural = "Kassa smenalari"
+
+    def __str__(self):
+        return f"{self.date} — {self.get_status_display()}"
+
+    @property
+    def is_open(self):
+        return self.status == self.STATUS_OPEN
+
+    def live_total(self):
+        """Smenaga tushgan pul (jurnal bo'yicha jonli yig'indi)."""
+        return self.entries.aggregate(s=models.Sum("amount"))["s"] or 0
+
+    @classmethod
+    def for_date(cls, day):
+        """O'sha kunning smenasini qaytaradi, yo'q bo'lsa ochadi."""
+        obj, _created = cls.objects.get_or_create(date=day)
+        return obj
+
+    @classmethod
+    def on_date(cls, day):
+        """O'sha kunning smenasi (yo'q bo'lsa None — o'qish uchun, ochmaydi)."""
+        return cls.objects.filter(date=day).first()
+
+
+class CashEntry(models.Model):
+    """Kassa jurnalining bitta yozuvi — o'chirilmaydi.
+
+    Har to'lov qabuli yoki tuzatilishi shu yerga yoziladi. `amount`
+    ishorali: +200 000 pul tushdi, tuzatishda farq (delta) yoziladi
+    (masalan 200 000 dan 400 000 ga o'zgarsa +200 000, aksincha −).
+    """
+
+    KIND_PAYMENT = "payment"
+    KIND_ADJUST = "adjust"
+    KIND_CHOICES = [
+        (KIND_PAYMENT, "To'lov"),
+        (KIND_ADJUST, "Tuzatish"),
+    ]
+
+    session = models.ForeignKey(
+        CashSession,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="entries",
+    )
+    payment = models.ForeignKey(
+        Payment,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="cash_entries",
+    )
+    student = models.ForeignKey(
+        Student,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="cash_entries",
+    )
+    student_name = models.CharField(max_length=200, blank=True)
+
+    cashier = models.ForeignKey(
+        Manager,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="cash_entries",
+    )
+    cashier_name = models.CharField(max_length=200, blank=True)
+
+    amount = models.IntegerField(verbose_name="Summa (ishorali)")
+    month = models.CharField(max_length=7, blank=True, verbose_name="To'lov davri")
+    kind = models.CharField(
+        max_length=10, choices=KIND_CHOICES, default=KIND_PAYMENT
+    )
+    note = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Kassa yozuvi"
+        verbose_name_plural = "Kassa yozuvlari"
+
+    def __str__(self):
+        return f"{self.student_name or '—'} — {self.amount:+} ({self.month})"

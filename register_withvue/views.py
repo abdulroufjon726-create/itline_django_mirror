@@ -35,6 +35,9 @@ from .models import (
     LessonReminderLog,
     PaymentSettings,
     PaymentRequest,
+    CashRegisterSettings,
+    CashSession,
+    CashEntry,
 )
 
 from django.utils import timezone
@@ -324,6 +327,35 @@ def _payment_due(amount_due, fallback_fee):
     """To'lov yozuvining sof due'si — amount_due 0 bo'lsa kurs narxiga tayanadi."""
     a = int(amount_due or 0)
     return a if a > 0 else int(fallback_fee or 0)
+
+
+def resync_unpaid_amount_due(students):
+    """Narx o'zgargach faqat KEYINGI oylarning to'lovlarini yangilaydi.
+
+    Kurs yoki stage narxi o'zgarganda chaqiriladi. Faqat joriy oydan
+    keyingi (month > joriy oy) to'lanmagan to'lovlar joriy narxga
+    tenglashadi — joriy oy, o'tgan oylar va to'langan (is_paid=True)
+    yozuvlar tarixiy qiymatida qoladi. Chegirma yangi narxdan oshib
+    ketmasin uchun qisqartiriladi.
+
+    Nechta yozuv o'zgargani qaytadi.
+    """
+    current_month = tashkent_today().strftime("%Y-%m")
+    updated = 0
+    for student in students:
+        fee = effective_monthly_fee(student)
+        if fee <= 0:
+            continue
+        # month "YYYY-MM" — leksikografik solishtiruv oy tartibiga mos
+        for p in student.payments.filter(is_paid=False, month__gt=current_month):
+            new_disc = min(int(p.discount or 0), fee)
+            if p.amount_due == fee and p.discount == new_disc:
+                continue
+            p.amount_due = fee
+            p.discount = new_disc
+            p.save(update_fields=["amount_due", "discount"])
+            updated += 1
+    return updated
 
 
 def compute_wallet(student):
@@ -1601,9 +1633,18 @@ def update_stage_price(request, stage):
             )
 
         sp, _ = StagePrice.objects.get_or_create(stage=stage, defaults={"price": price})
+        price_changed = sp.price != price
         sp.price = price
         sp.save()
-        return JsonResponse({"stage": stage, "price": sp.price})
+
+        # Narx o'zgardi — shu stage'dagi o'quvchilarning to'lanmagan
+        # to'lovlari joriy narxga yangilanadi (reaktiv)
+        synced = 0
+        if price_changed:
+            synced = resync_unpaid_amount_due(
+                Student.objects.filter(stage=stage).prefetch_related("payments", "groups")
+            )
+        return JsonResponse({"stage": stage, "price": sp.price, "payments_synced": synced})
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
@@ -3073,6 +3114,9 @@ def confirm_payment(request, payment_id):
         payment.paid_at = timezone.now() if payment.is_paid else None
         payment.save()
 
+        # 💵 Kassa jurnali — to'langan summa o'zgargani (delta) bugungi smenaga
+        record_cash_delta(request, payment, paid_amount_before, payment.paid_amount)
+
         # ✅ Vaqtida to'lov uchun coin mukofoti (yoki bekor qilinsa qaytarish)
         coin_awarded = 0
         try:
@@ -3164,6 +3208,9 @@ def update_payment_amount(request, payment_id):
         if not payment:
             return JsonResponse({"error": "To'lov topilmadi"}, status=404)
 
+        # Kassa jurnali uchun — o'zgarishdan oldingi to'langan summa
+        paid_amount_before = payment.paid_amount
+
         if "amount_due" in data:
             try:
                 payment.amount_due = int(data["amount_due"])
@@ -3198,6 +3245,9 @@ def update_payment_amount(request, payment_id):
             payment.paid_at = timezone.now() if payment.is_paid else None
 
         payment.save()
+
+        # 💵 Kassa jurnali — to'langan summa o'zgargani (delta) bugungi smenaga
+        record_cash_delta(request, payment, paid_amount_before, payment.paid_amount)
 
         # ✅ is_paid o'zgargan bo'lsa — vaqtida to'lov coinini sinxronlaymiz
         coin_awarded = 0
@@ -3243,6 +3293,294 @@ def update_payment_amount(request, payment_id):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
+
+
+# ─────────────────────────────
+# KASSA — kunlik smena + tranzaksiya jurnali
+# ─────────────────────────────
+#
+# Har to'lov qabuli/tuzatilishi shu yerdan o'tadi: paid_amount qancha
+# o'zgargani (delta) o'chirilmaydigan CashEntry sifatida yoziladi va
+# kassirning bugungi ochiq smenasiga tushadi. Shu tufayli to'lovni qayta
+# yozish (200k -> 400k) ham bugungi kassaga +200k bo'lib qo'shiladi,
+# kechagi topshirilgan smena buzilmaydi.
+
+
+def record_cash_delta(request, payment, old_amount, new_amount):
+    """To'lov summasi o'zgarishini kassa jurnaliga yozadi.
+
+    `old_amount` -> `new_amount` farqi 0 bo'lsa hech narsa qilmaydi.
+    Kunlik kassa yoqilgan bo'lsa — yozuv bugungi umumiy smenaga tushadi
+    (yo'q bo'lsa avtomatik ochiladi, har kuni yangi). Agar bugungi smena
+    allaqachon topshirilgan bo'lsa, yangi pul kelgani uchun qayta
+    ochiladi — kun tugamaguncha yakuniy emas. Kassa o'chirilgan bo'lsa
+    yozuv smensiz qoladi, lekin baribir saqlanadi.
+
+    Hech qachon xato otmaydi — jurnal yozilmagani uchun to'lov buzilmasin.
+    """
+    try:
+        delta = int(new_amount or 0) - int(old_amount or 0)
+        if delta == 0:
+            return None
+
+        manager = caller_manager(request)
+        actor_name = f"{manager.name} {manager.surname}".strip() if manager else ""
+        settings_obj = CashRegisterSettings.get_settings()
+
+        session = None
+        if settings_obj.enabled:
+            session = CashSession.for_date(tashkent_today())
+            # Topshirilgan kunga yana pul tushdi — qayta ochamiz
+            if session.status == CashSession.STATUS_CLOSED:
+                session.status = CashSession.STATUS_OPEN
+                session.counted_total = None
+                session.difference = 0
+                session.closed_at = None
+            if actor_name:
+                session.cashier_name = actor_name
+                if manager is not None:
+                    session.cashier = manager
+            session.save()
+
+        student = payment.student if payment.student_id else None
+        kind = CashEntry.KIND_PAYMENT if not old_amount else CashEntry.KIND_ADJUST
+
+        return CashEntry.objects.create(
+            session=session,
+            payment=payment,
+            student=student,
+            student_name=str(student) if student else "",
+            cashier=manager,
+            cashier_name=actor_name,
+            amount=delta,
+            month=payment.month or "",
+            kind=kind,
+        )
+    except Exception:  # noqa: BLE001 — kassa yozuvi to'lovni to'smasin
+        logging.getLogger(__name__).exception("CashEntry yozilmadi")
+        return None
+
+
+def _session_dict(s, *, with_entries=False):
+    """CashSession -> JSON (hisobotlar uchun umumiy shakl)."""
+    total = s.live_total()
+    data = {
+        "id": s.id,
+        "cashier_id": s.cashier_id,
+        "cashier_name": s.cashier_name,
+        "date": s.date.isoformat() if s.date else None,
+        "status": s.status,
+        "is_open": s.is_open,
+        "opened_at": s.opened_at.isoformat() if s.opened_at else None,
+        "closed_at": s.closed_at.isoformat() if s.closed_at else None,
+        # Ochiq smenada jonli yig'indi, yopilganda muhrlangan qiymat
+        "expected_total": total if s.is_open else s.expected_total,
+        "counted_total": s.counted_total,
+        "difference": s.difference,
+        "entries_count": s.entries.count(),
+        "note": s.note,
+    }
+    if with_entries:
+        data["entries"] = [
+            {
+                "id": e.id,
+                "student_name": e.student_name,
+                "amount": e.amount,
+                "month": e.month,
+                "kind": e.kind,
+                "created_at": e.created_at.isoformat() if e.created_at else None,
+            }
+            for e in s.entries.select_related().all()
+        ]
+    return data
+
+
+@csrf_exempt
+def get_cash_current(request):
+    """Bugungi kunlik kassa (yo'q bo'lsa hali to'lov qabul qilinmagan).
+
+    Kunlik kassa o'chirilgan bo'lsa `enabled=false` qaytadi — panel
+    kassa bo'limini ko'rsatmaydi.
+    """
+    denied = require_permission(request, "cash.view")
+    if denied:
+        return denied
+
+    settings_obj = CashRegisterSettings.get_settings()
+    if not settings_obj.enabled:
+        return JsonResponse({"enabled": False, "session": None})
+
+    session = CashSession.on_date(tashkent_today())
+    return JsonResponse(
+        {
+            "enabled": True,
+            "require_counted": settings_obj.require_counted,
+            "session": _session_dict(session, with_entries=True) if session else None,
+        }
+    )
+
+
+@csrf_exempt
+def close_cash_session(request):
+    """Kunlik kassani topshirish — fizik sanoqni kiritib smenani yopadi."""
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    denied = require_permission(request, "cash.close")
+    if denied:
+        return denied
+
+    settings_obj = CashRegisterSettings.get_settings()
+    if not settings_obj.enabled:
+        return JsonResponse({"error": "Kunlik kassa o'chirilgan"}, status=400)
+
+    session = CashSession.on_date(tashkent_today())
+    if session is None:
+        return JsonResponse({"error": "Bugun hali to'lov qabul qilinmagan"}, status=400)
+
+    try:
+        data = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    manager = caller_manager(request)
+    expected = session.live_total()
+    counted = data.get("counted_total")
+
+    if settings_obj.require_counted:
+        if counted is None or str(counted).strip() == "":
+            return JsonResponse(
+                {"error": "Sanalgan pulni kiriting"}, status=400
+            )
+        try:
+            counted = int(counted)
+        except (ValueError, TypeError):
+            return JsonResponse(
+                {"error": "counted_total son bo'lishi kerak"}, status=400
+            )
+        if counted < 0:
+            return JsonResponse(
+                {"error": "counted_total manfiy bo'lmaydi"}, status=400
+            )
+    else:
+        counted = expected if counted in (None, "") else int(counted)
+
+    session.expected_total = expected
+    session.counted_total = counted
+    session.difference = counted - expected
+    session.status = CashSession.STATUS_CLOSED
+    session.closed_at = timezone.now()
+    session.note = str(data.get("note") or "").strip()[:255]
+    if manager is not None:
+        session.cashier = manager
+        session.cashier_name = f"{manager.name} {manager.surname}".strip()
+    session.save()
+
+    log_action(
+        request,
+        "cash.close",
+        f"Kunlik kassa topshirildi — {session.date}: "
+        f"tizim {expected:,}, sanoq {counted:,}, farq {session.difference:+,}".replace(",", " "),
+        target_type="cash_session",
+        target_id=session.id,
+        target_name=session.cashier_name,
+        expected=expected,
+        counted=counted,
+        difference=session.difference,
+    )
+
+    return JsonResponse({"message": "Kassa topshirildi", "session": _session_dict(session)})
+
+
+@csrf_exempt
+def get_cash_sessions(request):
+    """Kunlik kassa tarixi (oylik ko'rinish).
+
+    Kassa umumiy — `cash.view` vakolati bo'lgan har kim ko'radi.
+    ?month=YYYY-MM bilan filtrlanadi (standart — joriy oy).
+    """
+    denied = require_permission(request, "cash.view")
+    if denied:
+        return denied
+
+    month = (request.GET.get("month") or tashkent_today().strftime("%Y-%m")).strip()
+    try:
+        year, mon = month.split("-")
+        year, mon = int(year), int(mon)
+    except (ValueError, AttributeError):
+        return JsonResponse({"error": "month format 'YYYY-MM' bo'lishi kerak"}, status=400)
+
+    qs = CashSession.objects.filter(date__year=year, date__month=mon)
+    sessions = [_session_dict(s) for s in qs]
+    closed = [s for s in sessions if s["status"] == CashSession.STATUS_CLOSED]
+
+    summary = {
+        "month": month,
+        "sessions_count": len(sessions),
+        "closed_count": len(closed),
+        "open_count": len(sessions) - len(closed),
+        "expected_total": sum(s["expected_total"] or 0 for s in sessions),
+        "counted_total": sum((s["counted_total"] or 0) for s in closed),
+        "difference_total": sum((s["difference"] or 0) for s in closed),
+    }
+    return JsonResponse({"summary": summary, "sessions": sessions})
+
+
+@csrf_exempt
+def get_cash_settings(request):
+    """Kassa sozlamasi (faqat supermenejer)."""
+    denied = require_super(request)
+    if denied:
+        return denied
+    s = CashRegisterSettings.get_settings()
+    return JsonResponse(
+        {
+            "enabled": s.enabled,
+            "require_counted": s.require_counted,
+            "lock_after_close": s.lock_after_close,
+        }
+    )
+
+
+@csrf_exempt
+def update_cash_settings(request):
+    """Kassa sozlamasini yangilash (faqat supermenejer)."""
+    if request.method not in ("POST", "PATCH"):
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_super(request)
+    if denied:
+        return denied
+    try:
+        data = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    s = CashRegisterSettings.get_settings()
+    if "enabled" in data:
+        s.enabled = bool(data["enabled"])
+    if "require_counted" in data:
+        s.require_counted = bool(data["require_counted"])
+    if "lock_after_close" in data:
+        s.lock_after_close = bool(data["lock_after_close"])
+    s.save()
+
+    state_word = "yoqildi" if s.enabled else "o'chirildi"
+    log_action(
+        request,
+        "cash.settings",
+        f"Kassa sozlamasi — kunlik kassa {state_word}",
+        target_type="cash_settings",
+        enabled=s.enabled,
+        require_counted=s.require_counted,
+    )
+    return JsonResponse(
+        {
+            "message": "Saqlandi",
+            "enabled": s.enabled,
+            "require_counted": s.require_counted,
+            "lock_after_close": s.lock_after_close,
+        }
+    )
 
 
 # ─────────────────────────────
@@ -3460,6 +3798,7 @@ def accept_payment_request(request, req_id):
         # Eski yozuvda narx belgilanmagan bo'lsa — kurs narxiga to'g'rilaymiz
         if (payment.amount_due or 0) <= 0 and fee > 0:
             payment.amount_due = fee
+        paid_amount_before = payment.paid_amount or 0
         payment.paid_amount = (payment.paid_amount or 0) + amount
         net_due = max(0, payment.amount_due - payment.discount)
         # To'liq qoplansa (yoki narx belgilanmagan bo'lsa) — to'langan deb belgilaymiz
@@ -3467,6 +3806,9 @@ def accept_payment_request(request, req_id):
             payment.is_paid = True
             payment.paid_at = timezone.now()
         payment.save()
+
+        # 💵 Kassa jurnali — chek orqali tushgan summa bugungi smenaga
+        record_cash_delta(request, payment, paid_amount_before, payment.paid_amount)
 
         try:
             sync_payment_ontime_coin(payment)
@@ -4766,6 +5108,16 @@ def update_course(request, course_id):
 
         course.save()
 
+        # Narx o'zgardi — shu kursdagi o'quvchilarning to'lanmagan
+        # to'lovlari joriy narxga yangilanadi (reaktiv, barcha bo'limda)
+        synced = 0
+        if course.monthly_fee != fee_before:
+            synced = resync_unpaid_amount_due(
+                Student.objects.filter(groups__course=course)
+                .distinct()
+                .prefetch_related("payments", "groups")
+            )
+
         # Narx o'zgarishi butun markazga ta'sir qiladi — alohida ko'rsatamiz
         if course.monthly_fee != fee_before:
             detail = (
@@ -4782,6 +5134,7 @@ def update_course(request, course_id):
             target_name=course.name,
             before=fee_before,
             after=course.monthly_fee,
+            payments_synced=synced,
         )
 
         serializer = CourseSerializer(course)

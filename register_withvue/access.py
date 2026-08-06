@@ -60,6 +60,9 @@ PERMISSIONS = [
     ("payments.discount", "Chegirma berish", "To'lovlar"),
     ("payments.requests", "To'lov so'rovlarini qabul/rad qilish", "To'lovlar"),
     ("payments.settings", "To'lov kartasini o'zgartirish", "To'lovlar"),
+    # Kassa — kunlik smena (kassir)
+    ("cash.view", "O'z kunlik kassasini ko'rish", "Kassa"),
+    ("cash.close", "Kunlik kassani topshirish", "Kassa"),
     # O'quvchilar
     ("students.view", "O'quvchilar ro'yxatini ko'rish", "O'quvchilar"),
     ("students.add", "O'quvchi qo'shish", "O'quvchilar"),
@@ -108,6 +111,8 @@ DEFAULT_PERMISSIONS = [
     "payments.view",
     "payments.edit",
     "payments.requests",
+    "cash.view",
+    "cash.close",
     "students.view",
     "teachers.view",
     "groups.view",

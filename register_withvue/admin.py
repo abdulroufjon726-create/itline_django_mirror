@@ -192,3 +192,46 @@ class LessonReminderLogAdmin(admin.ModelAdmin):
     list_display = ("id", "group", "date", "sent", "no_chat", "created_at")
     list_filter = ("date",)
     search_fields = ("group__name",)
+
+
+from .models import CashRegisterSettings, CashSession, CashEntry
+
+
+@admin.register(CashRegisterSettings)
+class CashRegisterSettingsAdmin(admin.ModelAdmin):
+    list_display = ("id", "enabled", "require_counted", "lock_after_close", "updated_at")
+
+
+@admin.register(CashSession)
+class CashSessionAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "cashier_name",
+        "date",
+        "status",
+        "expected_total",
+        "counted_total",
+        "difference",
+        "closed_at",
+    )
+    list_filter = ("status", "date")
+    search_fields = ("cashier_name",)
+    ordering = ("-date", "-opened_at")
+
+
+@admin.register(CashEntry)
+class CashEntryAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "created_at",
+        "student_name",
+        "amount",
+        "month",
+        "kind",
+        "cashier_name",
+        "session",
+    )
+    list_filter = ("kind", "month")
+    search_fields = ("student_name", "cashier_name")
+    ordering = ("-created_at",)
+    readonly_fields = ("created_at",)

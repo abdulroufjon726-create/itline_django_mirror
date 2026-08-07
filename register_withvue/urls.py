@@ -141,6 +141,9 @@ urlpatterns = [
     path("payments/generate/", views.generate_payments),
     path("payments/confirm/<int:payment_id>/", views.confirm_payment),
     path("payments/update/<int:payment_id>/", views.update_payment_amount),
+    # Bo'lib to'lash — jami emas, shu safar tushgan summa yuboriladi
+    path("payments/<int:payment_id>/pay/", views.add_payment_installment),
+    path("payments/<int:payment_id>/history/", views.get_payment_installments),
     # To'lov kartasi + chek so'rovlari
     path("payment-settings/", views.get_payment_settings),
     path("payment-settings/update/", views.update_payment_settings),

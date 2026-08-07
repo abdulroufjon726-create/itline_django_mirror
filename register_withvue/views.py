@@ -5,7 +5,8 @@ import secrets
 from datetime import datetime, date, timedelta
 
 from django.db import transaction
-from django.db.models import Sum, F, Count, Q
+from django.db.models import Sum, F, Count, Q, Value, IntegerField
+from django.db.models.functions import Greatest
 from django.http import JsonResponse, HttpResponseForbidden
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth.hashers import make_password, check_password
@@ -74,6 +75,29 @@ EXAM_PASS_COINS = 80
 HOMEWORK_DONE_COINS = 20
 HOMEWORK_PARTIAL_COINS = 10
 HOMEWORK_MISSED_COINS = -20
+
+# Davomat belgilanayotgan joyda chiqadigan tez tugmalar. Miqdor faqat
+# shu yerda turadi — panel ro'yxatni API'dan oladi, shuning uchun
+# o'zgarganda frontendni qayta yozish shart emas.
+COIN_QUICK_ACTIONS = [
+    {"reason": "exam_pass", "label": "Imtihon", "amount": EXAM_PASS_COINS},
+    {
+        "reason": "homework_done",
+        "label": "Vazifa to'liq",
+        "amount": HOMEWORK_DONE_COINS,
+    },
+    {
+        "reason": "homework_partial",
+        "label": "Vazifa chala",
+        "amount": HOMEWORK_PARTIAL_COINS,
+    },
+    {
+        "reason": "homework_missed",
+        "label": "Vazifa yo'q",
+        "amount": HOMEWORK_MISSED_COINS,
+    },
+]
+COIN_QUICK_AMOUNTS = {a["reason"]: a["amount"] for a in COIN_QUICK_ACTIONS}
 
 
 # ─────────────────────────────
@@ -170,6 +194,28 @@ def apply_coin_transaction(
     )
     student.refresh_from_db(fields=["coin_balance"])
     return student.coin_balance
+
+
+def monthly_bonus_used_ids(student_ids, teacher_id):
+    """Shu oy erkin bonus olib bo'lgan o'quvchilar to'plami.
+
+    Bonus (o'quvchi, ustoz, oy) bo'yicha bir martaga cheklangan. Ayni
+    shu funksiya cheklovni ham tekshiradi, tugma holatini ham beradi —
+    shunda panelda ochiq turgan tugma bosilganda "allaqachon berilgan"
+    deb rad javob kelib qolmaydi.
+    """
+    if not student_ids:
+        return set()
+    now = tashkent_now()
+    return set(
+        CoinTransaction.objects.filter(
+            student_id__in=student_ids,
+            reason="manual",
+            given_by_id=teacher_id,
+            created_at__year=now.year,
+            created_at__month=now.month,
+        ).values_list("student_id", flat=True)
+    )
 
 
 # ─────────────────────────────
@@ -2477,12 +2523,20 @@ def attendance_group_day(request):
                 a.student_id: a for a in Attendance.objects.filter(lesson=lesson)
             }
 
+        # Coin ustoz davomat belgilayotgan joyda beriladi — shu yerda
+        # balans ham, oylik erkin bonus ishlatilganmi ham ko'rinishi kerak
+        bonus_used = monthly_bonus_used_ids(
+            [s.id for s in students], group.teacher_id
+        )
+
         rows = [
             {
                 "attendance_id": existing[s.id].id,
                 "student_id": s.id,
                 "name": f"{s.name} {s.surname}",
                 "status": existing[s.id].status,
+                "coin_balance": s.coin_balance,
+                "bonus_used": s.id in bonus_used,
             }
             for s in students
             if s.id in existing
@@ -2491,8 +2545,11 @@ def attendance_group_day(request):
             {
                 "lesson_id": lesson.id,
                 "group_id": group.id,
+                "teacher_id": group.teacher_id,
                 "date": str(d),
                 "students": rows,
+                # Tugmalar miqdorini frontend qotirib yozmasin
+                "coin_actions": COIN_QUICK_ACTIONS,
             }
         )
     except Exception as e:
@@ -2552,6 +2609,7 @@ def attendance_group_month(request):
                 {
                     "student_id": s.id,
                     "name": f"{s.name} {s.surname}",
+                    "coin_balance": s.coin_balance,
                     "present": statuses.count("present"),
                     "late": statuses.count("late"),
                     "absent": statuses.count("absent"),
@@ -2944,6 +3002,8 @@ def get_all_payments(request):
         )
         # Har o'quvchining kartasi (barcha oylar bo'yicha) — bitta so'rovда
         wallet_map = wallets_for({p.student_id for p in payments})
+        # Bugun kassaga qaysi to'lovdan qancha tushgani — bitta so'rovda
+        today_map = paid_today_map([p.id for p in payments])
 
         data = []
         for p in payments:
@@ -2974,6 +3034,8 @@ def get_all_payments(request):
                     # Virtual karta (barcha oylar bo'yicha, o'quvchi darajasida)
                     "wallet_balance": wallet.get("balance", 0),
                     "wallet_debt": wallet.get("debt", 0),
+                    # Bugungi kassaga shu to'lovdan tushgan pul
+                    "paid_today": today_map.get(p.id, 0),
                 }
             )
         return JsonResponse(data, safe=False)
@@ -3061,6 +3123,223 @@ def generate_payments(request):
         return JsonResponse({"error": str(e)}, status=400)
 
 
+# ─────────────────────────────
+# BO'LIB TO'LASH — "bugun qancha tushdi"
+# ─────────────────────────────
+#
+# `Payment.paid_amount` — oy boshidan beri to'plangan JAMI. Kassaga esa
+# har safar shu jamining o'zgarishi (delta) tushadi. Menejer 400 000 lik
+# oyga bugun 200 000 olib, ertaga yana 200 000 olsa, ikkinchi kuni
+# maydonga 400 000 (yangi jami) yozishi kerak edi — 200 000 (bugun
+# qo'lga tushgani) yozsa delta 0 chiqib, bugungi kassa 200 000 kam
+# ko'rsatardi.
+#
+# Shuning uchun asosiy yo'l — `add_payment_installment`: unga jami emas,
+# SHU SAFAR tushgan summa yuboriladi, jamini tizim o'zi qo'shadi. Jamini
+# to'g'ridan-to'g'ri yozish faqat tuzatish uchun qoladi va kamaytirish
+# `allow_decrease` bilan ochiq tasdiqlanishini talab qiladi.
+
+
+def guard_paid_amount_change(payment, data):
+    """Jamini kamaytirish tasodifan o'tib ketmasin.
+
+    `paid_amount` jami tushgan pul. Uni kamaytirish kassadan pul
+    yechish demak (jurnalga manfiy yozuv tushadi), shuning uchun bu
+    faqat ataylab qilingan tuzatish bo'lishi kerak. Odatiy xato —
+    "bugun tushgan summani" jami o'rniga yozish; bunda yangi qiymat
+    eskisidan kichik chiqadi va pul yo'qoladi.
+
+    Qaytaradi: xato bo'lsa JsonResponse, aks holda None.
+    """
+    if "paid_amount" not in data:
+        return None
+    try:
+        new_amount = int(data["paid_amount"])
+    except (ValueError, TypeError):
+        return None  # formatni chaqiruvchining o'zi tekshiradi
+    old_amount = int(payment.paid_amount or 0)
+    if new_amount >= old_amount or data.get("allow_decrease"):
+        return None
+    return JsonResponse(
+        {
+            "error": (
+                f"To'langan jami {old_amount:,} dan {new_amount:,} ga kamaymoqda. "
+                "Bo'lib to'lash bo'lsa — 'To'lov qo'shish' orqali shu safar "
+                "tushgan summani kiriting. Haqiqatan tuzatmoqchi bo'lsangiz "
+                "allow_decrease bilan yuboring."
+            ).replace(",", " "),
+            "code": "paid_amount_decrease",
+            "paid_amount": old_amount,
+        },
+        status=400,
+    )
+
+
+def payment_net_due(payment):
+    """Chegirmadan keyin to'lanishi kerak bo'lgan sof summa."""
+    return max(0, int(payment.amount_due or 0) - int(payment.discount or 0))
+
+
+@csrf_exempt
+def add_payment_installment(request, payment_id):
+    """Bo'lib to'lash — SHU SAFAR tushgan summani qo'shadi.
+
+    Body: {"amount": 200000, "note": "..."} — `amount` jami emas, hozir
+    kassaga tushgan pul. Jami (`paid_amount`) ustiga qo'shiladi, kassa
+    jurnaliga esa shu summa bugungi smenaga yoziladi. Ertaga yana pul
+    kelsa yana shu yo'l bilan qo'shiladi — kechagi topshirilgan smena
+    umuman qo'zg'almaydi.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    try:
+        data = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    try:
+        payment_id = int(payment_id)
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "Invalid payment_id"}, status=400)
+
+    payment = Payment.objects.select_related("student").filter(id=payment_id).first()
+    if not payment:
+        return JsonResponse({"error": "To'lov topilmadi"}, status=404)
+
+    try:
+        amount = int(data.get("amount"))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "amount son bo'lishi kerak"}, status=400)
+    if amount <= 0:
+        return JsonResponse(
+            {"error": "amount 0 dan katta bo'lishi kerak"}, status=400
+        )
+
+    paid_amount_before = int(payment.paid_amount or 0)
+    payment.paid_amount = paid_amount_before + amount
+
+    # Sof summa qoplansa — oy yopiladi. Narx belgilanmagan (0) bo'lsa
+    # bu qadam o'tkazib yuboriladi, aks holda 1 so'm ham "to'landi"
+    # bo'lib qolardi.
+    net_due = payment_net_due(payment)
+    was_paid = payment.is_paid
+    if net_due > 0 and payment.paid_amount >= net_due:
+        payment.is_paid = True
+        payment.paid_at = timezone.now()
+    payment.save()
+
+    # 💵 Kassa jurnali — shu summa bugungi smenaga tushadi
+    record_cash_delta(request, payment, paid_amount_before, payment.paid_amount)
+
+    coin_awarded = 0
+    try:
+        student = Student.objects.filter(id=payment.student_id).first()
+        if student:
+            before = student.coin_balance
+            sync_payment_ontime_coin(payment)
+            student.refresh_from_db(fields=["coin_balance"])
+            coin_awarded = student.coin_balance - before
+    except Exception:  # noqa: BLE001 — coin to'lovni to'smasin
+        logging.getLogger(__name__).exception("payment ontime coin xatosi")
+
+    student_label = str(payment.student) if payment.student_id else "—"
+    remaining = max(0, net_due - payment.paid_amount)
+    log_action(
+        request,
+        "payment.installment",
+        f"{student_label} — {payment.month}: +{amount:,} so'm qabul qilindi, "
+        f"jami {payment.paid_amount:,}, qolgan {remaining:,}".replace(",", " "),
+        target_type="payment",
+        target_id=payment.id,
+        target_name=student_label,
+        month=payment.month,
+        amount=amount,
+        paid_amount=payment.paid_amount,
+    )
+
+    # Har qabulda chek ketadi — o'quvchi shu safar qancha
+    # o'tkazganini va qancha qolganini ko'rsin (oy yopilmasa ham).
+    try:
+        from . import telegram as tg
+
+        tg.send_receipt(payment, amount=amount)
+    except Exception:  # noqa: BLE001 — chek to'lovni to'smasin
+        logging.getLogger(__name__).exception("Chek yuborilmadi")
+
+    wallet = compute_wallet(payment.student) if payment.student_id else {}
+    return JsonResponse(
+        {
+            "message": f"{amount:,} so'm qabul qilindi".replace(",", " "),
+            "amount": amount,
+            "paid_amount": payment.paid_amount,
+            "amount_due": payment.amount_due,
+            "discount": payment.discount,
+            "remaining": remaining,
+            "is_paid": payment.is_paid,
+            "closed_now": payment.is_paid and not was_paid,
+            "coin_awarded": coin_awarded,
+            "wallet_balance": wallet.get("balance", 0),
+            "wallet_debt": wallet.get("debt", 0),
+            "installments": payment_installments(payment),
+        },
+        status=201,
+    )
+
+
+def payment_installments(payment):
+    """Shu to'lovga tushgan pul harakatlari (kassa jurnalidan).
+
+    Manba kassa jurnalining o'zi — hisobot va bu ro'yxat hech qachon
+    bir-biridan ayrilmasin. Eng yangisi yuqorida.
+    """
+    entries = (
+        CashEntry.objects.filter(payment=payment)
+        .select_related("session")
+        .order_by("-created_at")
+    )
+    return [
+        {
+            "id": e.id,
+            "amount": e.amount,
+            "kind": e.kind,
+            "cashier_name": e.cashier_name,
+            "note": e.note,
+            # Kassa kuni (smena sanasi) — hisobot shu kun bo'yicha yig'iladi
+            "date": e.session.date.isoformat() if e.session_id else None,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in entries
+    ]
+
+
+@csrf_exempt
+def get_payment_installments(request, payment_id):
+    """To'lov tarixi — qaysi kuni qancha tushgani."""
+    try:
+        payment_id = int(payment_id)
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "Invalid payment_id"}, status=400)
+
+    payment = Payment.objects.select_related("student").filter(id=payment_id).first()
+    if not payment:
+        return JsonResponse({"error": "To'lov topilmadi"}, status=404)
+
+    net_due = payment_net_due(payment)
+    return JsonResponse(
+        {
+            "payment_id": payment.id,
+            "month": payment.month,
+            "amount_due": payment.amount_due,
+            "discount": payment.discount,
+            "net_due": net_due,
+            "paid_amount": payment.paid_amount,
+            "remaining": max(0, net_due - int(payment.paid_amount or 0)),
+            "is_paid": payment.is_paid,
+            "installments": payment_installments(payment),
+        }
+    )
+
+
 @csrf_exempt
 def confirm_payment(request, payment_id):
     """To'lovni tasdiqlash."""
@@ -3076,6 +3355,10 @@ def confirm_payment(request, payment_id):
         payment = Payment.objects.filter(id=payment_id).first()
         if not payment:
             return JsonResponse({"error": "To'lov topilmadi"}, status=404)
+
+        denied = guard_paid_amount_change(payment, data)
+        if denied:
+            return denied
 
         # Jurnal uchun — nima o'zgarganini keyin solishtiramiz
         paid_before = payment.is_paid
@@ -3207,6 +3490,10 @@ def update_payment_amount(request, payment_id):
         payment = Payment.objects.filter(id=payment_id).first()
         if not payment:
             return JsonResponse({"error": "To'lov topilmadi"}, status=404)
+
+        denied = guard_paid_amount_change(payment, data)
+        if denied:
+            return denied
 
         # Kassa jurnali uchun — o'zgarishdan oldingi to'langan summa
         paid_amount_before = payment.paid_amount
@@ -3361,6 +3648,88 @@ def record_cash_delta(request, payment, old_amount, new_amount):
         return None
 
 
+def paid_today_map(payment_ids):
+    """{payment_id: bugungi smenaga tushgan summa} — bitta so'rovda.
+
+    To'lovlar jadvalida "bugun qancha oldik" ko'rinib tursin: menejer
+    jamiga qarab emas, shu ko'rsatkichga qarab kassani solishtiradi.
+    """
+    if not payment_ids:
+        return {}
+    session = CashSession.on_date(tashkent_today())
+    if session is None:
+        return {}
+    rows = (
+        CashEntry.objects.filter(session=session, payment_id__in=payment_ids)
+        .values("payment_id")
+        .annotate(total=Sum("amount"))
+    )
+    return {r["payment_id"]: r["total"] or 0 for r in rows}
+
+
+def month_collection_plan(month=None):
+    """Shu oy: qancha yig'ilishi kerak, qancha yig'ilgan, qancha qolgan.
+
+    Kassir kun davomida faqat "bugun qancha tushdi" ni ko'rardi —
+    oylik maqsad ko'rinmagani uchun qancha qarz qolganini bilmasdi.
+
+    Summalar CHEGIRMADAN KEYIN olinadi: kassir qo'liga tushadigan pul
+    shu. Qolgan har qator bo'yicha alohida 0 ga cheklanadi — bittasining
+    ortiqcha to'lovi boshqasining qarzini yopib ko'rsatmasin.
+    """
+    month = (month or tashkent_today().strftime("%Y-%m")).strip()
+
+    net_due = Greatest(
+        F("amount_due") - F("discount"), Value(0), output_field=IntegerField()
+    )
+    rows = Payment.objects.filter(month=month).annotate(
+        net_due=net_due,
+        row_remaining=Greatest(
+            net_due - F("paid_amount"), Value(0), output_field=IntegerField()
+        ),
+    )
+    totals = rows.aggregate(
+        due=Sum("net_due"),
+        collected=Sum("paid_amount"),
+        remaining=Sum("row_remaining"),
+    )
+
+    due_total = totals["due"] or 0
+    collected_total = totals["collected"] or 0
+    remaining_total = totals["remaining"] or 0
+    total_count = rows.count()
+    paid_count = rows.filter(is_paid=True).count()
+
+    # Kassaga shu oyda haqiqatda tushgan pul (jurnal bo'yicha). Yuqoridagi
+    # "yig'ilgan" dan farq qiladi: bu yerda boshqa oy uchun qilingan
+    # to'lovlar ham bor, chunki kassa kun bo'yicha yig'iladi.
+    try:
+        year, mon = (int(x) for x in month.split("-"))
+        cash_month_total = (
+            CashEntry.objects.filter(
+                session__date__year=year, session__date__month=mon
+            ).aggregate(s=Sum("amount"))["s"]
+            or 0
+        )
+    except (ValueError, TypeError):
+        cash_month_total = 0
+
+    return {
+        "month": month,
+        "due_total": due_total,
+        "collected_total": collected_total,
+        "remaining_total": remaining_total,
+        # 0..100 — panel progress chizig'i uchun
+        "collected_percent": (
+            round(collected_total * 100 / due_total) if due_total > 0 else 0
+        ),
+        "total_count": total_count,
+        "paid_count": paid_count,
+        "unpaid_count": total_count - paid_count,
+        "cash_month_total": cash_month_total,
+    }
+
+
 def _session_dict(s, *, with_entries=False):
     """CashSession -> JSON (hisobotlar uchun umumiy shakl)."""
     total = s.live_total()
@@ -3408,7 +3777,7 @@ def get_cash_current(request):
 
     settings_obj = CashRegisterSettings.get_settings()
     if not settings_obj.enabled:
-        return JsonResponse({"enabled": False, "session": None})
+        return JsonResponse({"enabled": False, "session": None, "plan": None})
 
     session = CashSession.on_date(tashkent_today())
     return JsonResponse(
@@ -3416,6 +3785,8 @@ def get_cash_current(request):
             "enabled": True,
             "require_counted": settings_obj.require_counted,
             "session": _session_dict(session, with_entries=True) if session else None,
+            # Oylik maqsad — bugungi smena ochilmagan bo'lsa ham ko'rinadi
+            "plan": month_collection_plan(request.GET.get("month")),
         }
     )
 
@@ -3463,7 +3834,17 @@ def close_cash_session(request):
                 {"error": "counted_total manfiy bo'lmaydi"}, status=400
             )
     else:
-        counted = expected if counted in (None, "") else int(counted)
+        # Sanoq ixtiyoriy — kiritilmasa tizim hisobi olinadi. Kiritilgani
+        # son bo'lmasa jim 500 emas, tushunarli xato qaytishi kerak.
+        if counted in (None, ""):
+            counted = expected
+        else:
+            try:
+                counted = int(counted)
+            except (ValueError, TypeError):
+                return JsonResponse(
+                    {"error": "counted_total son bo'lishi kerak"}, status=400
+                )
 
     session.expected_total = expected
     session.counted_total = counted
@@ -3523,7 +3904,14 @@ def get_cash_sessions(request):
         "counted_total": sum((s["counted_total"] or 0) for s in closed),
         "difference_total": sum((s["difference"] or 0) for s in closed),
     }
-    return JsonResponse({"summary": summary, "sessions": sessions})
+    return JsonResponse(
+        {
+            "summary": summary,
+            "sessions": sessions,
+            # Shu oy qancha yig'ilishi kerak edi / qancha yig'ildi
+            "plan": month_collection_plan(month),
+        }
+    )
 
 
 @csrf_exempt
@@ -4322,15 +4710,8 @@ def give_manual_coins(request):
         reason = data.get("reason", "manual").strip()
         amount = data.get("amount")
 
-        defaults = {
-            "exam_pass": EXAM_PASS_COINS,
-            "homework_done": HOMEWORK_DONE_COINS,
-            "homework_partial": HOMEWORK_PARTIAL_COINS,
-            "homework_missed": HOMEWORK_MISSED_COINS,
-        }
-
         if amount is None:
-            amount = defaults.get(reason)
+            amount = COIN_QUICK_AMOUNTS.get(reason)
 
         if amount is None:
             return JsonResponse({"error": "amount kiritilmadi"}, status=400)
@@ -4342,15 +4723,8 @@ def give_manual_coins(request):
 
         # Oylik manual bonus cheklovi
         if reason == "manual":
-            now = datetime.now()
-            already_used = CoinTransaction.objects.filter(
-                student=student,
-                reason="manual",
-                given_by=teacher,
-                created_at__year=now.year,
-                created_at__month=now.month,
-            ).exists()
-            if already_used:
+            teacher_id = teacher.id if teacher else None
+            if monthly_bonus_used_ids([student.id], teacher_id):
                 return JsonResponse(
                     {"error": "Bu o'quvchiga bu oy allaqachon bonus berilgan"},
                     status=400,
@@ -4380,6 +4754,10 @@ def give_manual_coins(request):
                 "message": "Coin berildi!",
                 "student_id": student.id,
                 "coin_balance": new_balance,
+                "amount": amount,
+                "reason": reason,
+                # Erkin bonus berilgan bo'lsa panel tugmani darhol yopadi
+                "bonus_used": reason == "manual",
             },
             status=201,
         )
@@ -5727,9 +6105,19 @@ def get_finance_summary(request):
 
         generated_student_ids = set(month_payments.values_list("student_id", flat=True))
 
-        # Payment yaratilgan studentlar uchun ularning haqiqiy amount_due qiymati ishlatiladi
+        # Payment yaratilgan studentlar uchun ularning haqiqiy amount_due
+        # qiymati ishlatiladi — chegirmadan keyin: markaz qo'liga chegirma
+        # ayrilgan summa tushadi, aks holda "kutilgan" doim oshib ketardi
+        # va "qolgan" hech qachon nolga tushmasdi.
         expected_from_generated = (
-            month_payments.aggregate(total=Sum("amount_due"))["total"] or 0
+            month_payments.annotate(
+                net_due=Greatest(
+                    F("amount_due") - F("discount"),
+                    Value(0),
+                    output_field=IntegerField(),
+                )
+            ).aggregate(total=Sum("net_due"))["total"]
+            or 0
         )
 
         # Payment yaratilmagan studentlar uchun joriy stage narxi bo'yicha hisoblanadi

@@ -91,6 +91,8 @@ urlpatterns = [
         "teachers/<int:teacher_id>/penalty-limit/", views.update_teacher_penalty_limit
     ),
     path("teachers/reassign/", views.reassign_students),
+    # Bitta ustozning tarixi — oylar kesimi, o'quvchilari, pul harakati
+    path("teachers/<int:teacher_id>/history/", views.get_teacher_history),
     # ───────────────────────────────
     # MENEJER PANELI
     # ───────────────────────────────
@@ -107,6 +109,8 @@ urlpatterns = [
     # STUDENTS
     # ───────────────────────────────
     path("students/", views.get_students),
+    # Jadvaldan yuklash — ?dry_run bilan avval tekshiriladi
+    path("students/import/", views.import_students),
     path("students/update/<int:student_id>/", views.update_student),
     path("students/delete/<int:student_id>/", views.delete_student),
     path("students/bulk-delete/", views.bulk_delete_students),
@@ -211,6 +215,21 @@ urlpatterns = [
     path("courses/create/", views.create_course),
     path("courses/update/<int:course_id>/", views.update_course),
     path("courses/delete/<int:course_id>/", views.delete_course),
+    # ───────────────────────────────
+    # KURS DARAJALARI (Beginner / A1 / 2-modul ...)
+    # ───────────────────────────────
+    path("courses/<int:course_id>/levels/", views.get_course_levels),
+    path("courses/<int:course_id>/levels/create/", views.create_course_level),
+    path("course-levels/<int:level_id>/update/", views.update_course_level),
+    path("course-levels/<int:level_id>/delete/", views.delete_course_level),
+    # ───────────────────────────────
+    # XONALAR
+    # ───────────────────────────────
+    path("rooms/", views.get_rooms),
+    path("rooms/create/", views.create_room),
+    path("rooms/schedule/", views.get_room_schedule),
+    path("rooms/<int:room_id>/update/", views.update_room),
+    path("rooms/<int:room_id>/delete/", views.delete_room),
     # news
     path("news/", get_news, name="news-list"),
     path("news/active/", get_active_news, name="news-active"),

@@ -9,9 +9,12 @@ from .models import (
     Payment,
     StudentPenalty,
     CoinTransaction,
+    Course,
+    CourseLevel,
     Group,
     Lead,
     AdChannel,
+    Room,
 )
 
 
@@ -50,12 +53,39 @@ class StudentAdmin(admin.ModelAdmin):
         "stage",
         "schedule",
         "coin_balance",
+        "status",
         "is_admin",
         "is_excellence",
         "created_at",
     )
-    list_filter = ("stage", "schedule", "is_admin", "is_excellence")
+    list_filter = ("status", "stage", "schedule", "is_admin", "is_excellence")
     search_fields = ("name", "surname", "phone")
+
+
+class CourseLevelInline(admin.TabularInline):
+    model = CourseLevel
+    extra = 0
+
+
+@admin.register(Course)
+class CourseAdmin(admin.ModelAdmin):
+    list_display = ("id", "name", "monthly_fee")
+    search_fields = ("name",)
+    inlines = [CourseLevelInline]
+
+
+@admin.register(CourseLevel)
+class CourseLevelAdmin(admin.ModelAdmin):
+    list_display = ("id", "course", "name", "order", "monthly_fee")
+    list_filter = ("course",)
+    search_fields = ("name", "course__name")
+
+
+@admin.register(Room)
+class RoomAdmin(admin.ModelAdmin):
+    list_display = ("id", "name", "capacity", "is_active")
+    list_filter = ("is_active",)
+    search_fields = ("name",)
 
 
 @admin.register(CoinTransaction)

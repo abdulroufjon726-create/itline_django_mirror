@@ -2,7 +2,7 @@ import calendar
 import json
 import logging
 import secrets
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, time as dtime, timedelta, timezone as dt_timezone
 
 from django.db import transaction
 from django.db.models import Sum, F, Count, Q, Value, IntegerField
@@ -39,13 +39,15 @@ from .models import (
     CashRegisterSettings,
     CashSession,
     CashEntry,
+    CourseLevel,
+    Room,
 )
 
 from django.utils import timezone
 from django.conf import settings
 from rest_framework import generics, permissions
 from .phones import forget_student_phones
-from .serializers import NewsSerializer
+from .serializers import CourseLevelSerializer, NewsSerializer, RoomSerializer
 from .access import (
     DEFAULT_PERMISSIONS,
     caller_manager,
@@ -121,21 +123,31 @@ class TeacherMiniSerializer(serializers.ModelSerializer):
 
 class CourseSerializer(serializers.ModelSerializer):
     groups_count = serializers.SerializerMethodField()
+    levels = CourseLevelSerializer(many=True, read_only=True)
+    levels_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Course
-        fields = ["id", "name", "monthly_fee", "groups_count"]
+        fields = ["id", "name", "monthly_fee", "groups_count", "levels", "levels_count"]
 
     def get_groups_count(self, obj):
         return obj.groups.count()
 
+    def get_levels_count(self, obj):
+        return obj.levels.count()
+
 
 class GroupSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source="course.name", read_only=True)
-    # ✅ FIX: IntegerField (Course.monthly_fee = IntegerField)
-    monthly_fee = serializers.IntegerField(
+    # Guruhning haqiqiy narxi: daraja narxi bo'lsa u, aks holda kursniki.
+    # Ilgari to'g'ridan-to'g'ri kursdan olinardi — daraja qo'shilgach
+    # ro'yxatda ko'ringan narx bilan hisoblangan to'lov farq qilardi.
+    monthly_fee = serializers.SerializerMethodField()
+    course_monthly_fee = serializers.IntegerField(
         source="course.monthly_fee", read_only=True, allow_null=True
     )
+    level_name = serializers.CharField(source="level.name", read_only=True, default="")
+    room_name = serializers.SerializerMethodField()
 
     students_count = serializers.SerializerMethodField()
     students = StudentMinimalSerializer(many=True, read_only=True)
@@ -147,6 +159,12 @@ class GroupSerializer(serializers.ModelSerializer):
 
     def get_students_count(self, obj):
         return obj.students.count()
+
+    def get_monthly_fee(self, obj):
+        return obj.effective_monthly_fee
+
+    def get_room_name(self, obj):
+        return obj.room_ref.name if obj.room_ref_id else (obj.room or "")
 
 
 # ─────────────────────────────
@@ -243,6 +261,160 @@ def tashkent_now():
 
 def tashkent_today():
     return tashkent_now().date()
+
+
+# ─────────────────────────────────────────
+# SANA ORALIG'I (barcha tarix bo'limlari uchun umumiy)
+# ─────────────────────────────────────────
+#
+# Har bir ro'yxat "qaysi kundan qaysi kungacha" bo'yicha filtrlanadi.
+# Uch xil ko'rinishda so'ralishi mumkin va hammasi bir xil natijaga
+# keladi — frontend qaysi biri qulay bo'lsa shuni yuboradi:
+#
+#   ?from=2026-08-10&to=2026-08-20   — aniq kunlar (ikkalasi ham kiradi)
+#   ?month=2026-08                   — butun oy
+#   ?year=2026                       — butun yil
+#
+# Hech biri berilmasa filtr qo'yilmaydi (hamma vaqt).
+
+
+class RangeError(ValueError):
+    """Noto'g'ri sana oralig'i — chaqiruvchi 400 qaytaradi."""
+
+
+def _parse_day(value, field):
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value[:10], "%Y-%m-%d").date()
+    except ValueError:
+        raise RangeError(f"{field} 'YYYY-MM-DD' formatida bo'lishi kerak")
+
+
+def parse_range(request, *, default_days=None):
+    """So'rovdan (start_date, end_date) oralig'ini oladi — ikki chet ham kiradi.
+
+    Berilmasa (None, None) qaytadi. `default_days` berilsa va hech qanday
+    filtr kelmasa — oxirgi shuncha kun olinadi.
+
+    RangeError — noto'g'ri format yoki teskari oraliq.
+    """
+    get = request.GET.get
+
+    start = _parse_day(get("from") or get("date_from") or get("start"), "from")
+    end = _parse_day(get("to") or get("date_to") or get("end"), "to")
+
+    month = (get("month") or "").strip()
+    if month and not (start or end):
+        try:
+            year, mon = int(month[:4]), int(month[5:7])
+            last = calendar.monthrange(year, mon)[1]
+            start, end = date(year, mon, 1), date(year, mon, last)
+        except (ValueError, IndexError):
+            raise RangeError("month 'YYYY-MM' formatida bo'lishi kerak")
+
+    year_str = (get("year") or "").strip()
+    if year_str and not (start or end):
+        try:
+            y = int(year_str)
+            start, end = date(y, 1, 1), date(y, 12, 31)
+        except ValueError:
+            raise RangeError("year 'YYYY' formatida bo'lishi kerak")
+
+    if start and end and start > end:
+        raise RangeError("Boshlanish sanasi tugash sanasidan keyin bo'lishi mumkin emas")
+
+    if start is None and end is None and default_days:
+        end = tashkent_today()
+        start = end - timedelta(days=default_days - 1)
+
+    return start, end
+
+
+def apply_date_range(qs, field, start, end):
+    """DateField bo'yicha filtr (masalan CashSession.date, Expense.date)."""
+    if start:
+        qs = qs.filter(**{f"{field}__gte": start})
+    if end:
+        qs = qs.filter(**{f"{field}__lte": end})
+    return qs
+
+
+def apply_datetime_range(qs, field, start, end):
+    """DateTimeField bo'yicha filtr — chegaralar Toshkent kuni bo'yicha.
+
+    Baza UTC'da yozadi, foydalanuvchi esa Toshkent kunini nazarda tutadi.
+    10-avgust "ertalab 00:00 Toshkent" = 9-avgust 19:00 UTC — shuni
+    hisobga olmasak kunning birinchi besh soati qo'shni kunga tushib
+    ketardi.
+    """
+    if start:
+        qs = qs.filter(**{f"{field}__gte": _tashkent_midnight_utc(start)})
+    if end:
+        qs = qs.filter(
+            **{f"{field}__lt": _tashkent_midnight_utc(end + timedelta(days=1))}
+        )
+    return qs
+
+
+def _tashkent_midnight_utc(day):
+    """O'sha Toshkent kunining 00:00 payti — UTC'da, timezone bilan."""
+    naive = datetime.combine(day, datetime.min.time()) - TASHKENT_OFFSET
+    return naive.replace(tzinfo=dt_timezone.utc)
+
+
+def range_payload(start, end):
+    """Javobga qo'shiladigan oraliq tavsifi — frontend inputlarni shundan to'ldiradi."""
+    return {"from": str(start) if start else "", "to": str(end) if end else ""}
+
+
+def months_in_range(start, end):
+    """Oraliqqa tegib o'tadigan "YYYY-MM" oylar ro'yxati (tartib bilan)."""
+    if not start or not end:
+        return []
+    out, y, m = [], start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        out.append(f"{y:04d}-{m:02d}")
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
+
+
+# ─────────────────────────────────────────
+# O'QUVCHI HOLATI (kutilmoqda / bog'lanish kerak / faol)
+# ─────────────────────────────────────────
+
+STUDENT_STATUSES = [s for s, _label in Student.STATUS_CHOICES]
+STUDENT_STATUS_LABELS = dict(Student.STATUS_CHOICES)
+
+
+def clean_status(value, *, default=None):
+    """Kelgan holatni tekshiradi. Noto'g'ri bo'lsa RangeError."""
+    value = (value or "").strip().lower()
+    if not value:
+        return default
+    if value not in STUDENT_STATUSES:
+        raise RangeError(
+            "status quyidagilardan biri bo'lishi kerak: " + ", ".join(STUDENT_STATUSES)
+        )
+    return value
+
+
+def status_filter(request, qs, field="status"):
+    """?status=pending yoki ?status=pending,contact — bir nechtasi ham bo'ladi."""
+    raw = (request.GET.get("status") or "").strip()
+    if not raw or raw == "all":
+        return qs
+    wanted = [clean_status(part) for part in raw.split(",") if part.strip()]
+    return qs.filter(**{f"{field}__in": wanted}) if wanted else qs
+
+
+def status_counts(qs):
+    """Holatlar kesimida sanoq — ro'yxat tepasidagi "5 kutilmoqda" plitkalari uchun."""
+    rows = dict(qs.values_list("status").annotate(n=db_models.Count("id")))
+    out = {s: rows.get(s, 0) for s in STUDENT_STATUSES}
+    out["total"] = sum(out.values())
+    return out
 
 
 def student_primary_group(student):
@@ -357,15 +529,14 @@ def _wallet_from_totals(total_due, total_discount, total_paid):
 def effective_monthly_fee(student):
     """O'quvchining haqiqiy oylik to'lovi.
 
-    Ustunlik: guruh kursining narxi (Course.monthly_fee) -> stage narxi.
+    Ustunlik: guruh darajasining narxi -> kurs narxi -> stage narxi.
     To'lov yozuvida amount_due 0/belgilanmagan bo'lsa shu qiymat ishlatiladi —
     shunda karta (wallet) va ko'rsatilgan "Oylik to'lov" bir xil bo'ladi.
     """
     group = student_primary_group(student)
-    if group and group.course_id:
-        fee = getattr(group.course, "monthly_fee", 0) or 0
-        if fee:
-            return int(fee)
+    fee = group.effective_monthly_fee if group else 0
+    if fee:
+        return int(fee)
     return int(get_stage_price(student.stage) or 0)
 
 
@@ -429,7 +600,9 @@ def wallets_for(student_ids):
         return out
     # Har o'quvchining haqiqiy oylik narxi (guruh->kurs prefetch bilan)
     fee_map = {}
-    for s in Student.objects.filter(id__in=ids).prefetch_related("groups__course"):
+    for s in Student.objects.filter(id__in=ids).prefetch_related(
+        "groups__course", "groups__level"
+    ):
         fee_map[s.id] = effective_monthly_fee(s)
 
     agg = {}
@@ -1392,28 +1565,134 @@ def _real_students():
     return Student.objects.filter(is_admin=False, is_excellence=False)
 
 
+def _range_months(request):
+    """Ustoz/to'lov statistikasi uchun davr — "YYYY-MM" oylar ro'yxati.
+
+    Pul hisoblari oy birligida yuritiladi (Payment.month), shuning uchun
+    kun oralig'i o'ziga tegib o'tgan oylarga aylantiriladi: 10-avgustdan
+    5-sentabrgacha tanlansa avgust va sentabr oylari olinadi. Hech narsa
+    tanlanmasa — joriy oy.
+
+    (start, end, months) qaytaradi. RangeError — noto'g'ri format.
+    """
+    start, end = parse_range(request)
+    if not start and not end:
+        today = tashkent_today()
+        last = calendar.monthrange(today.year, today.month)[1]
+        start = date(today.year, today.month, 1)
+        end = date(today.year, today.month, last)
+    elif not start:
+        start = date(end.year, end.month, 1)
+    elif not end:
+        last = calendar.monthrange(start.year, start.month)[1]
+        end = date(start.year, start.month, last)
+    return start, end, months_in_range(start, end)
+
+
+def teacher_payment_stats(months, teacher_ids=None):
+    """Ustozlar kesimida to'lov holati: {teacher_id: {...}}.
+
+    Bitta so'rovda hammasi hisoblanadi — ustozlar ro'yxati sikl ichida
+    ORM'ga tegmaydi. `net_due` = amount_due − chegirma (markaz qo'liga
+    tushadigan sof summa; boshqa hamma joyda ham shu qoida).
+    """
+    qs = Payment.objects.filter(month__in=months)
+    if teacher_ids is not None:
+        qs = qs.filter(student__teacher_id__in=teacher_ids)
+
+    stats = {}
+    for row in qs.values("student__teacher_id", "student_id", "amount_due", "discount", "paid_amount"):
+        tid = row["student__teacher_id"]
+        if tid is None:
+            continue
+        s = stats.setdefault(
+            tid,
+            {
+                "expected": 0,
+                "collected": 0,
+                "paid_students": set(),
+                "unpaid_students": set(),
+                "billed_students": set(),
+            },
+        )
+        net_due = max(0, int(row["amount_due"] or 0) - int(row["discount"] or 0))
+        paid = int(row["paid_amount"] or 0)
+        s["expected"] += net_due
+        s["collected"] += paid
+        s["billed_students"].add(row["student_id"])
+        (s["paid_students"] if paid > 0 else s["unpaid_students"]).add(row["student_id"])
+
+    out = {}
+    for tid, s in stats.items():
+        # Bir oyda to'lagan, boshqasida to'lamagan o'quvchi ikkala
+        # to'plamda ham bo'ladi — "to'lamagan" deb faqat hech qaysi oyda
+        # bir tiyin ham bermaganlarni sanaymiz
+        unpaid = s["unpaid_students"] - s["paid_students"]
+        expected, collected = s["expected"], s["collected"]
+        out[tid] = {
+            "expected": expected,
+            "collected": collected,
+            "remaining": max(0, expected - collected),
+            "collected_percent": round(collected * 100 / expected) if expected else 0,
+            "paid_students": len(s["paid_students"]),
+            "unpaid_students": len(unpaid),
+            "billed_students": len(s["billed_students"]),
+        }
+    return out
+
+
+_EMPTY_TEACHER_STATS = {
+    "expected": 0,
+    "collected": 0,
+    "remaining": 0,
+    "collected_percent": 0,
+    "paid_students": 0,
+    "unpaid_students": 0,
+    "billed_students": 0,
+}
+
+
 def get_teachers_overview(request):
     """Menejer uchun ustozlar sahifasi — har biri bo'yicha statistika.
+
+    Davr: ?from=&to= / ?month= / ?year= (tanlanmasa joriy oy). Kun
+    oralig'i o'zi tegib o'tgan to'lov oylariga aylantiriladi.
+
+    Har ustoz uchun: nechta o'quvchisi bor (holatlar kesimida ham),
+    nechtasi shu davrda to'lov qildi, qancha yig'ildi va qancha qoldi.
 
     Login qila oladimi (`can_login`) ham qaytariladi: import paytida
     telefoni to'liq kelmagan ustozlarga shartli kod berilgan, ular
     raqami kiritilmaguncha tizimga kira olmaydi.
     """
     try:
-        counts = dict(
+        try:
+            start, end, months = _range_months(request)
+        except RangeError as e:
+            return JsonResponse({"error": str(e)}, status=400)
+
+        # O'quvchilar soni — holatlar kesimida (faol / kutilmoqda / bog'lanish)
+        by_status = {}
+        for tid, status, n in (
             _real_students()
-            .filter(teacher__isnull=False)
-            .values_list("teacher_id")
+            .filter(teacher__isnull=False, is_graduate=False)
+            .values_list("teacher_id", "status")
             .annotate(n=db_models.Count("id"))
-        )
+        ):
+            by_status.setdefault(tid, {})[status] = n
+
         groups = dict(
             Group.objects.filter(teacher__isnull=False)
             .values_list("teacher_id")
             .annotate(n=db_models.Count("id"))
         )
+        pay = teacher_payment_stats(months)
+
         data = []
         for t in Teacher.objects.order_by("name"):
             key = _phone_key(t.phone)
+            counts = by_status.get(t.id, {})
+            stats = pay.get(t.id, _EMPTY_TEACHER_STATS)
             data.append(
                 {
                     "id": t.id,
@@ -1421,8 +1700,21 @@ def get_teachers_overview(request):
                     "phone": t.phone,
                     "is_senior": t.is_senior,
                     "penalty_limit": t.penalty_limit,
-                    "students_count": counts.get(t.id, 0),
+                    # Eski ko'rinishlar `students_count` ni o'qiydi —
+                    # ma'nosi o'zgarmadi: hammasi (bitiruvchidan tashqari)
+                    "students_count": sum(counts.values()),
+                    "active_count": counts.get("active", 0),
+                    "pending_count": counts.get("pending", 0),
+                    "contact_count": counts.get("contact", 0),
                     "groups_count": groups.get(t.id, 0),
+                    # Davr bo'yicha to'lov holati
+                    "paid_students": stats["paid_students"],
+                    "unpaid_students": stats["unpaid_students"],
+                    "billed_students": stats["billed_students"],
+                    "collected": stats["collected"],
+                    "expected": stats["expected"],
+                    "remaining": stats["remaining"],
+                    "collected_percent": stats["collected_percent"],
                     "can_login": len(key) >= MIN_PHONE_KEY_LEN,
                     # O'zbek raqami 9 xonali — undan qisqasi jadvaldan
                     # chala kelgan, menejer to'g'rilashi kerak
@@ -1438,7 +1730,180 @@ def get_teachers_overview(request):
                     ),
                 }
             )
-        return JsonResponse(data, safe=False)
+
+        totals = {
+            "collected": sum(r["collected"] for r in data),
+            "expected": sum(r["expected"] for r in data),
+            "paid_students": sum(r["paid_students"] for r in data),
+            "students": sum(r["students_count"] for r in data),
+        }
+        totals["remaining"] = max(0, totals["expected"] - totals["collected"])
+
+        # Eski ko'rinishlar bu manzildan massiv kutadi va backend
+        # frontenddan oldin deploy bo'ladi — shuning uchun standart
+        # javob o'zgarishsiz massiv bo'lib qoladi. Davr va jami
+        # ko'rsatkichlar kerak bo'lsa ?format=full so'raladi.
+        if request.GET.get("format") != "full":
+            return JsonResponse(data, safe=False)
+        return JsonResponse(
+            {
+                "teachers": data,
+                "range": range_payload(start, end),
+                "months": months,
+                "totals": totals,
+            }
+        )
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+
+def get_teacher_history(request, teacher_id):
+    """Bitta ustozning tarixi — oylar kesimi, o'quvchilari va pul harakati.
+
+    Davr: ?from=&to= / ?month= / ?year= (tanlanmasa joriy oy).
+
+    Uch qism qaytadi:
+      months   — har oy uchun yig'ildi/kutilgan/qoldi va nechta o'quvchi to'ladi
+      students — o'quvchilar ro'yxati, davr bo'yicha to'lagani va qarzi
+      entries  — kassa jurnalidan haqiqiy pul harakati (sana bilan)
+    """
+    try:
+        teacher = Teacher.objects.filter(id=teacher_id).first()
+        if not teacher:
+            return JsonResponse({"error": "Ustoz topilmadi"}, status=404)
+
+        try:
+            start, end, months = _range_months(request)
+        except RangeError as e:
+            return JsonResponse({"error": str(e)}, status=400)
+
+        students = list(
+            _real_students()
+            .filter(teacher_id=teacher.id)
+            .select_related("teacher")
+            .prefetch_related("groups__course", "groups__level")
+            .order_by("name", "surname")
+        )
+        student_ids = [s.id for s in students]
+
+        rows = list(
+            Payment.objects.filter(student_id__in=student_ids, month__in=months).values(
+                "student_id", "month", "amount_due", "discount", "paid_amount", "is_paid"
+            )
+        )
+
+        # ── Oylar kesimi ──
+        per_month = {
+            m: {"month": m, "expected": 0, "collected": 0, "paid_students": 0, "students": 0}
+            for m in months
+        }
+        # ── O'quvchi kesimi ──
+        per_student = {
+            sid: {"expected": 0, "collected": 0, "months_paid": 0, "months_billed": 0}
+            for sid in student_ids
+        }
+
+        for r in rows:
+            net_due = max(0, int(r["amount_due"] or 0) - int(r["discount"] or 0))
+            paid = int(r["paid_amount"] or 0)
+            m = per_month.get(r["month"])
+            if m is not None:
+                m["expected"] += net_due
+                m["collected"] += paid
+                m["students"] += 1
+                if paid > 0:
+                    m["paid_students"] += 1
+            s = per_student.get(r["student_id"])
+            if s is not None:
+                s["expected"] += net_due
+                s["collected"] += paid
+                s["months_billed"] += 1
+                if paid > 0:
+                    s["months_paid"] += 1
+
+        month_rows = []
+        for m in months:
+            row = per_month[m]
+            row["remaining"] = max(0, row["expected"] - row["collected"])
+            row["collected_percent"] = (
+                round(row["collected"] * 100 / row["expected"]) if row["expected"] else 0
+            )
+            month_rows.append(row)
+
+        student_rows = []
+        for s in students:
+            agg = per_student[s.id]
+            group = student_primary_group(s)
+            student_rows.append(
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "surname": s.surname,
+                    "phone": "" if (s.phone or "").startswith("—") else (s.phone or ""),
+                    "status": s.status,
+                    "status_label": STUDENT_STATUS_LABELS.get(s.status, s.status),
+                    "group_name": group.name if group else "",
+                    "monthly_fee": effective_monthly_fee(s),
+                    "expected": agg["expected"],
+                    "collected": agg["collected"],
+                    "remaining": max(0, agg["expected"] - agg["collected"]),
+                    "months_paid": agg["months_paid"],
+                    "months_billed": agg["months_billed"],
+                    "has_paid": agg["collected"] > 0,
+                }
+            )
+
+        # ── Kassa jurnali: haqiqiy sanalar bilan pul harakati ──
+        entries_qs = CashEntry.objects.filter(student_id__in=student_ids)
+        entries_qs = apply_datetime_range(entries_qs, "created_at", start, end)
+        entries = [
+            {
+                "id": e.id,
+                "date": str(e.session.date) if e.session_id else "",
+                "created_at": (e.created_at + TASHKENT_OFFSET).strftime("%Y-%m-%d %H:%M"),
+                "student_id": e.student_id,
+                "student_name": e.student_name,
+                "amount": e.amount,
+                "month": e.month,
+                "kind": e.kind,
+                "cashier_name": e.cashier_name,
+                "note": e.note,
+            }
+            for e in entries_qs.select_related("session").order_by("-created_at")[:300]
+        ]
+
+        totals = {
+            "expected": sum(r["expected"] for r in month_rows),
+            "collected": sum(r["collected"] for r in month_rows),
+            "students": len(student_rows),
+            "paid_students": sum(1 for r in student_rows if r["has_paid"]),
+            "active_students": sum(1 for r in student_rows if r["status"] == "active"),
+            "pending_students": sum(1 for r in student_rows if r["status"] == "pending"),
+            "contact_students": sum(1 for r in student_rows if r["status"] == "contact"),
+            # Jurnaldagi haqiqiy tushum — tanlangan kunlar bo'yicha
+            "received_in_range": sum(e["amount"] for e in entries),
+        }
+        totals["remaining"] = max(0, totals["expected"] - totals["collected"])
+        totals["unpaid_students"] = totals["students"] - totals["paid_students"]
+
+        return JsonResponse(
+            {
+                "teacher": {
+                    "id": teacher.id,
+                    "name": teacher.name,
+                    "phone": teacher.phone,
+                    "is_senior": teacher.is_senior,
+                    "salary_mode": teacher.salary_mode,
+                    "salary_percent": float(teacher.salary_percent or 0),
+                    "salary_per_student": teacher.salary_per_student,
+                },
+                "range": range_payload(start, end),
+                "months": month_rows,
+                "students": student_rows,
+                "entries": entries,
+                "totals": totals,
+            }
+        )
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 
@@ -1449,12 +1914,28 @@ def get_students_overview(request):
     Filtrlar: ?teacher_id=<id> — bitta ustozning o'quvchilari,
               ?teacher_id=none — biriktirilmaganlar,
               ?search=<matn> — ism yoki telefon bo'yicha,
-              ?include_graduates=1 — bitiruvchilar ham.
+              ?include_graduates=1 — bitiruvchilar ham,
+              ?status=pending|contact|active (vergul bilan bir nechtasi),
+              ?from=&to= / ?month= / ?year= — ro'yxatga olingan sana oralig'i.
+
+    Javobdagi `summary` — oraliqqa tushgan o'quvchilarni holatlar
+    kesimida sanaydi: "10-avgustdan 20-avgustgacha 30 ta yozildi,
+    5 tasi kutilmoqda" degan savolga bitta so'rov bilan javob beradi.
+    Sanoq qidiruvdan oldin olinadi — qidiruv ro'yxatni toraytiradi,
+    davr statistikasini emas.
     """
     try:
         qs = _real_students().select_related("teacher")
         if request.GET.get("include_graduates") not in ("1", "true", "yes"):
             qs = qs.filter(is_graduate=False)
+
+        try:
+            start, end = parse_range(request)
+            qs = apply_datetime_range(qs, "created_at", start, end)
+            period_counts = status_counts(qs)
+            qs = status_filter(request, qs)
+        except RangeError as e:
+            return JsonResponse({"error": str(e)}, status=400)
 
         teacher_id = (request.GET.get("teacher_id") or "").strip()
         if teacher_id in ("none", "null", "0"):
@@ -1508,6 +1989,10 @@ def get_students_overview(request):
                 "wallet_debt": wallet_map.get(s.id, {}).get("debt", 0),
                 # Yuz tanish terminalidagi raqami (bo'lmasa bo'sh satr)
                 "face_person_id": s.face_person_id,
+                "status": s.status,
+                "status_label": STUDENT_STATUS_LABELS.get(s.status, s.status),
+                "status_note": s.status_note,
+                "created_at": (s.created_at + TASHKENT_OFFSET).strftime("%Y-%m-%d"),
             }
             for s in rows
         ]
@@ -1516,10 +2001,278 @@ def get_students_overview(request):
                 "count": len(data),
                 "students": data,
                 "hidden": _hidden_phone_holders(search) if search and not data else [],
+                "summary": period_counts,
+                "range": range_payload(start, end),
             }
         )
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
+
+
+# ─────────────────────────────
+# O'QUVCHILARNI IMPORT QILISH (Excel / CSV)
+#
+# Faylni frontend o'qiydi va qatorlarni JSON ko'rinishida yuboradi —
+# backendga qo'shimcha kutubxona (openpyxl) kerak bo'lmaydi va menejer
+# ustunlarni yuklashdan oldin ekranda ko'rib moslashtiradi.
+#
+# Ikki bosqichli: avval `dry_run` bilan tekshiriladi (nima yaratiladi,
+# qayerda xato bor), keyin haqiqiy yozish. Shu tufayli 200 qatorlik
+# jadval yarmigacha yozilib, yarmi xatoda qolib ketmaydi.
+# ─────────────────────────────
+
+IMPORT_MAX_ROWS = 1000
+
+
+def _import_row_name(row):
+    """Ism/familiya — alohida ustunlarda yoki bitta "F.I.Sh" ustunida."""
+    name = str(row.get("name") or "").strip()
+    surname = str(row.get("surname") or "").strip()
+    if name and not surname:
+        parts = name.split()
+        if len(parts) > 1:
+            name, surname = parts[0], " ".join(parts[1:])
+    return name, surname
+
+
+@csrf_exempt
+def import_students(request):
+    """Jadvaldan o'quvchilarni yuklash.
+
+    Body: {
+        rows: [{name, surname?, phone?, phone2?, teacher_name?|teacher_id?,
+                group_name?|group_id?, status?, stage?, note?}, ...],
+        dry_run: true,             # faqat tekshirish (standart: false)
+        default_status: "pending", # ustun bo'lmasa qaysi holat qo'yilsin
+        default_teacher_id: <id>,
+        default_group_id: <id>
+    }
+
+    Har qator uchun natija qaytadi: created / duplicate / error.
+    Telefon bo'yicha dublikat tekshiriladi — bir xil raqamli o'quvchi
+    ikki marta yaratilmaydi (jadval qayta yuklansa ham xavfsiz).
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    # Ikki qatlam: begona umuman kira olmasin, menejerda esa
+    # "o'quvchi qo'shish" vakolati bo'lsin (yuzlab yozuv bir zarbda
+    # yaratiladi — bu bo'sh ro'yxatga qaytarib bo'lmaydigan amal)
+    denied = _require_manager_or_admin(request) or require_permission(
+        request, "students.add"
+    )
+    if denied:
+        return denied
+
+    try:
+        data = json.loads(request.body or "{}")
+        rows = data.get("rows")
+        if not isinstance(rows, list) or not rows:
+            return JsonResponse({"error": "rows bo'sh — yuklanadigan qator yo'q"}, status=400)
+        if len(rows) > IMPORT_MAX_ROWS:
+            return JsonResponse(
+                {"error": f"Bir martada {IMPORT_MAX_ROWS} tagacha qator yuklash mumkin"},
+                status=400,
+            )
+
+        dry_run = bool(data.get("dry_run"))
+        try:
+            default_status = clean_status(data.get("default_status"), default="pending")
+        except RangeError as e:
+            return JsonResponse({"error": str(e)}, status=400)
+
+        # Ustoz va guruhlarni nom bo'yicha topish uchun lug'atlar —
+        # sikl ichida bazaga tegmaymiz
+        teachers_by_name = {t.name.strip().lower(): t for t in Teacher.objects.all()}
+        teachers_by_id = {t.id: t for t in teachers_by_name.values()}
+        groups_by_name = {
+            g.name.strip().lower(): g for g in Group.objects.select_related("teacher")
+        }
+        groups_by_id = {g.id: g for g in groups_by_name.values()}
+
+        default_teacher = teachers_by_id.get(_safe_int(data.get("default_teacher_id")))
+        default_group = groups_by_id.get(_safe_int(data.get("default_group_id")))
+
+        results = []
+        to_create = []  # (Student, group)
+        seen_phones = set()
+
+        for index, raw in enumerate(rows):
+            line = index + 1
+            if not isinstance(raw, dict):
+                results.append({"line": line, "status": "error", "reason": "Qator noto'g'ri"})
+                continue
+
+            name, surname = _import_row_name(raw)
+            if not name:
+                results.append(
+                    {"line": line, "status": "error", "reason": "Ism ustuni bo'sh"}
+                )
+                continue
+
+            phone = str(raw.get("phone") or "").strip()
+            key = _phone_key(phone)
+            who = f"{name} {surname}".strip()
+
+            if phone and len(key) >= MIN_PHONE_KEY_LEN:
+                if key in seen_phones:
+                    results.append(
+                        {
+                            "line": line,
+                            "status": "duplicate",
+                            "name": who,
+                            "reason": "Bu raqam jadvalning o'zida takrorlangan",
+                        }
+                    )
+                    continue
+                existing = _find_student_by_any_phone(phone)
+                if existing:
+                    results.append(
+                        {
+                            "line": line,
+                            "status": "duplicate",
+                            "name": who,
+                            "reason": f"Bazada bor — {existing.name} {existing.surname}".strip(),
+                            "student_id": existing.id,
+                        }
+                    )
+                    continue
+                seen_phones.add(key)
+            elif phone:
+                results.append(
+                    {
+                        "line": line,
+                        "status": "error",
+                        "name": who,
+                        "reason": f"Telefon raqam to'liq emas ({phone})",
+                    }
+                )
+                continue
+
+            try:
+                status = clean_status(raw.get("status"), default=default_status)
+            except RangeError as e:
+                results.append(
+                    {"line": line, "status": "error", "name": who, "reason": str(e)}
+                )
+                continue
+
+            teacher = default_teacher
+            if raw.get("teacher_id"):
+                teacher = teachers_by_id.get(_safe_int(raw.get("teacher_id"))) or teacher
+            elif str(raw.get("teacher_name") or "").strip():
+                wanted = str(raw["teacher_name"]).strip().lower()
+                found = teachers_by_name.get(wanted)
+                if not found:
+                    results.append(
+                        {
+                            "line": line,
+                            "status": "error",
+                            "name": who,
+                            "reason": f"«{raw['teacher_name']}» ismli ustoz topilmadi",
+                        }
+                    )
+                    continue
+                teacher = found
+
+            group = default_group
+            if raw.get("group_id"):
+                group = groups_by_id.get(_safe_int(raw.get("group_id"))) or group
+            elif str(raw.get("group_name") or "").strip():
+                wanted = str(raw["group_name"]).strip().lower()
+                found = groups_by_name.get(wanted)
+                if not found:
+                    results.append(
+                        {
+                            "line": line,
+                            "status": "error",
+                            "name": who,
+                            "reason": f"«{raw['group_name']}» nomli guruh topilmadi",
+                        }
+                    )
+                    continue
+                group = found
+
+            # Guruh tanlangan-u ustoz ko'rsatilmagan bo'lsa — guruhniki
+            if group and not teacher:
+                teacher = group.teacher
+
+            student = Student(
+                name=name,
+                surname=surname,
+                # Raqamsiz o'quvchi ham yuklanadi (jadvalda ko'p uchraydi).
+                # `phone` unikal, shuning uchun bo'sh satr emas — NULL.
+                phone=phone or None,
+                phone2=str(raw.get("phone2") or "").strip()[:50],
+                teacher=teacher,
+                stage=_safe_int(raw.get("stage")) or 1,
+                schedule=(group.schedule if group else "odd"),
+                status=status,
+                status_note=str(raw.get("status_note") or "").strip()[:255],
+                note=str(raw.get("note") or "").strip(),
+                source="import",
+            )
+            to_create.append((student, group))
+            results.append(
+                {
+                    "line": line,
+                    "status": "created",
+                    "name": who,
+                    "phone": phone,
+                    "teacher_name": teacher.name if teacher else "",
+                    "group_name": group.name if group else "",
+                    "student_status": status,
+                }
+            )
+
+        summary = {
+            "total": len(rows),
+            "created": sum(1 for r in results if r["status"] == "created"),
+            "duplicates": sum(1 for r in results if r["status"] == "duplicate"),
+            "errors": sum(1 for r in results if r["status"] == "error"),
+            "dry_run": dry_run,
+        }
+
+        if dry_run:
+            return JsonResponse({"summary": summary, "rows": results})
+
+        # ── Haqiqiy yozish ──
+        now = timezone.now()
+        with transaction.atomic():
+            for student, _group in to_create:
+                student.status_changed_at = now
+            Student.objects.bulk_create([s for s, _ in to_create])
+
+            # bulk_create SQLite'da ham ID beradi (Django 4+), lekin
+            # M2M ni o'zi bog'lamaydi — guruhlarga alohida qo'shamiz
+            by_group = {}
+            for student, group in to_create:
+                if group and student.id:
+                    by_group.setdefault(group.id, []).append(student.id)
+            for group_id, ids in by_group.items():
+                groups_by_id[group_id].students.add(*ids)
+
+        log_action(
+            request,
+            "student.create",
+            f"Jadvaldan {summary['created']} ta o'quvchi yuklandi"
+            + (f", {summary['duplicates']} ta dublikat" if summary["duplicates"] else "")
+            + (f", {summary['errors']} ta xato" if summary["errors"] else ""),
+            target_type="student",
+            target_name="import",
+            **summary,
+        )
+        return JsonResponse({"summary": summary, "rows": results})
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+def _safe_int(value):
+    try:
+        return int(str(value).strip())
+    except (ValueError, TypeError, AttributeError):
+        return None
 
 
 def _hidden_phone_holders(search):
@@ -1703,7 +2456,11 @@ def update_stage_price(request, stage):
 
 
 def get_students(request):
-    """O'quvchilar ro'yxati."""
+    """O'quvchilar ro'yxati.
+
+    ?status= va ?from=/?to= (yoki ?month=/?year=) bilan filtrlanadi —
+    boshqa ro'yxatlar bilan bir xil qoida.
+    """
     try:
         teacher_id = request.GET.get("teacher_id")
         qs = Student.objects.select_related("teacher").filter(
@@ -1714,6 +2471,13 @@ def get_students(request):
                 qs = qs.filter(teacher_id=int(teacher_id))
             except ValueError:
                 return JsonResponse({"error": "Invalid teacher_id"}, status=400)
+
+        try:
+            start, end = parse_range(request)
+            qs = apply_datetime_range(qs, "created_at", start, end)
+            qs = status_filter(request, qs)
+        except RangeError as e:
+            return JsonResponse({"error": str(e)}, status=400)
 
         rows = list(qs)
         wallet_map = wallets_for([s.id for s in rows])
@@ -1732,6 +2496,9 @@ def get_students(request):
                 "monthly_discount": s.monthly_discount,
                 "wallet_balance": wallet_map.get(s.id, {}).get("balance", 0),
                 "wallet_debt": wallet_map.get(s.id, {}).get("debt", 0),
+                "status": s.status,
+                "status_label": STUDENT_STATUS_LABELS.get(s.status, s.status),
+                "status_note": s.status_note,
             }
             for s in rows
         ]
@@ -1771,6 +2538,20 @@ def update_student(request, student_id):
                 )
             student.schedule = data["schedule"]
 
+        # Qabul holati. O'zgargan payt saqlanadi — "qachondan beri
+        # kutilmoqda" degan savolga shu maydon javob beradi.
+        status_before = student.status
+        if "status" in data:
+            try:
+                new_status = clean_status(data["status"], default=student.status)
+            except RangeError as e:
+                return JsonResponse({"error": str(e)}, status=400)
+            if new_status != student.status:
+                student.status = new_status
+                student.status_changed_at = timezone.now()
+        if "status_note" in data:
+            student.status_note = str(data.get("status_note") or "").strip()[:255]
+
         # ✅ Doimiy oylik chegirma. O'zgartirilganda mavjud (hali to'lanmagan)
         # oylarга ham qo'llanadi — to'langan oylar tegilmaydi.
         monthly_discount_changed = False
@@ -1797,6 +2578,11 @@ def update_student(request, student_id):
             detail = (
                 f"doimiy chegirma {student.monthly_discount:,} so'm".replace(",", " ")
             )
+        elif student.status != status_before:
+            detail = (
+                f"holati «{STUDENT_STATUS_LABELS.get(status_before, status_before)}» → "
+                f"«{STUDENT_STATUS_LABELS.get(student.status, student.status)}»"
+            )
         else:
             detail = ", ".join(sorted(data.keys())) or "o'zgarishsiz"
         log_action(
@@ -1820,6 +2606,11 @@ def update_student(request, student_id):
                 "monthly_discount": student.monthly_discount,
                 "wallet_balance": wallet.get("balance", 0),
                 "wallet_debt": wallet.get("debt", 0),
+                "status": student.status,
+                "status_label": STUDENT_STATUS_LABELS.get(
+                    student.status, student.status
+                ),
+                "status_note": student.status_note,
             }
         )
     except json.JSONDecodeError:
@@ -2069,8 +2860,14 @@ def register_student(request):
         admin_password = data.get("admin_password", "")
         excellence_password = data.get("excellence_password", "")
 
-        is_admin = admin_password == ADMIN_PASSWORD
-        is_excellence = excellence_password == EXCELLENCE_PASSWORD
+        # ⚠️ Sozlama bo'sh bo'lsa hech kim mos kelmasligi kerak.
+        # ADMIN_PASSWORD/EXCELLENCE_PASSWORD muhit o'zgaruvchisidan keladi
+        # va standarti bo'sh satr — oddiy tenglikda ("" == "") maydonni
+        # to'ldirmagan HAR QANDAY odam ustoz/menejer profiliga aylanardi.
+        is_admin = bool(ADMIN_PASSWORD) and admin_password == ADMIN_PASSWORD
+        is_excellence = (
+            bool(EXCELLENCE_PASSWORD) and excellence_password == EXCELLENCE_PASSWORD
+        )
 
         teacher = None
         if not is_admin and not is_excellence:
@@ -2082,6 +2879,25 @@ def register_student(request):
             make_password(data.get("password", "")) if data.get("password") else ""
         )
 
+        # Qabul holati. Menejer paneli uni ro'yxatga qo'shayotganda
+        # tanlaydi (kutilmoqda / bog'lanish kerak / faol) — tanlamasa
+        # "faol". O'quvchi o'zi ro'yxatdan o'tsa esa "kutilmoqda":
+        # u hali guruhga qo'yilmagan, unga to'lov yozilishi noto'g'ri
+        # bo'lardi va menejer ro'yxatda uni ko'rib bog'lanadi.
+        #
+        # Ustoz/menejer profillari o'quvchi emas — ular doim faol.
+        added_by_staff = _require_manager_or_admin(request) is None
+        try:
+            status = (
+                "active"
+                if (is_admin or is_excellence)
+                else clean_status(
+                    data.get("status"), default="active" if added_by_staff else "pending"
+                )
+            )
+        except RangeError as e:
+            return JsonResponse({"error": str(e)}, status=400)
+
         student = Student.objects.create(
             name=name,
             surname=data.get("surname", "").strip(),
@@ -2091,6 +2907,9 @@ def register_student(request):
             is_admin=is_admin,
             is_excellence=is_excellence,
             schedule=data.get("schedule", "odd"),
+            status=status,
+            status_changed_at=timezone.now(),
+            status_note=str(data.get("status_note") or "").strip()[:255],
         )
 
         if is_admin or is_excellence:
@@ -2119,11 +2938,17 @@ def register_student(request):
             request,
             "student.create",
             f"{student.name} {student.surname} qo'shildi — {role}"
-            + (f", ustoz {student.teacher.name}" if student.teacher else ""),
+            + (f", ustoz {student.teacher.name}" if student.teacher else "")
+            + (
+                ""
+                if student.status == "active"
+                else f", holati «{STUDENT_STATUS_LABELS[student.status]}»"
+            ),
             target_type="student",
             target_id=student.id,
             target_name=f"{student.name} {student.surname}".strip(),
             role=role,
+            status=student.status,
         )
 
         return JsonResponse(
@@ -2140,6 +2965,10 @@ def register_student(request):
                 "is_admin": student.is_admin,
                 "is_excellence": student.is_excellence,
                 "coin_balance": student.coin_balance,
+                "status": student.status,
+                "status_label": STUDENT_STATUS_LABELS.get(
+                    student.status, student.status
+                ),
             },
             status=201,
         )
@@ -2976,7 +3805,12 @@ def get_student_wallet(request, student_id):
 
 
 def get_all_payments(request):
-    """Barcha to'lovlar."""
+    """Barcha to'lovlar.
+
+    Filtrlar: ?month=YYYY-MM (bitta oy), ?from=&to= yoki ?year= (bir
+    nechta oy — oraliq tegib o'tgan to'lov oylari), ?teacher_id=,
+    ?status= (o'quvchining qabul holati).
+    """
     try:
         month = request.GET.get("month", "").strip()
         teacher_id = request.GET.get("teacher_id", "").strip()
@@ -2988,6 +3822,21 @@ def get_all_payments(request):
 
         if month:
             qs = qs.filter(month=month)
+        else:
+            # Kun oralig'i yoki yil tanlangan bo'lsa — tegishli oylar
+            try:
+                start, end = parse_range(request)
+            except RangeError as e:
+                return JsonResponse({"error": str(e)}, status=400)
+            months = months_in_range(start, end)
+            if months:
+                qs = qs.filter(month__in=months)
+
+        try:
+            qs = status_filter(request, qs, field="student__status")
+        except RangeError as e:
+            return JsonResponse({"error": str(e)}, status=400)
+
         if teacher_id:
             try:
                 qs = qs.filter(student__teacher_id=int(teacher_id))
@@ -3062,9 +3911,15 @@ def generate_payments(request):
                 {"error": "month format 'YYYY-MM' bo'lishi kerak"}, status=400
             )
 
-        students = Student.objects.filter(
-            is_admin=False, is_excellence=False
-        ).prefetch_related("groups")
+        # Faqat faol o'quvchiga to'lov yaratiladi — "kutilmoqda" yoki
+        # "bog'lanish kerak" holatidagi odam hali o'qimayapti, unga qarz
+        # yozilsa oylik yig'im rejasi ham, qarzdorlar ro'yxati ham
+        # yolg'on ko'rsatardi
+        students = (
+            Student.objects.filter(is_admin=False, is_excellence=False, status="active")
+            .exclude(is_graduate=True)
+            .prefetch_related("groups__course", "groups__level")
+        )
         created_count = 0
         skipped_count = 0
         not_opened_count = 0
@@ -3092,9 +3947,20 @@ def generate_payments(request):
             else:
                 skipped_count += 1
 
+        inactive_count = (
+            Student.objects.filter(is_admin=False, is_excellence=False, is_graduate=False)
+            .exclude(status="active")
+            .count()
+        )
+
         msg = f"{created_count} ta yangi to'lov yaratildi, {skipped_count} ta allaqachon mavjud edi."
         if not_opened_count:
             msg += f" {not_opened_count} ta o'quvchi guruhi bu oydan keyin ochilgani uchun o'tkazib yuborildi."
+        if inactive_count:
+            msg += (
+                f" {inactive_count} ta o'quvchi hali faol emas "
+                "(kutilmoqda / bog'lanish kerak) — ularga to'lov yozilmadi."
+            )
 
         log_action(
             request,
@@ -3115,6 +3981,7 @@ def generate_payments(request):
                 "created": created_count,
                 "skipped": skipped_count,
                 "not_opened": not_opened_count,
+                "inactive": inactive_count,
             }
         )
     except json.JSONDecodeError:
@@ -3875,25 +4742,27 @@ def close_cash_session(request):
 
 @csrf_exempt
 def get_cash_sessions(request):
-    """Kunlik kassa tarixi (oylik ko'rinish).
+    """Kunlik kassa tarixi.
 
     Kassa umumiy — `cash.view` vakolati bo'lgan har kim ko'radi.
-    ?month=YYYY-MM bilan filtrlanadi (standart — joriy oy).
+    Davr: ?from=&to= / ?month=YYYY-MM / ?year=YYYY (standart — joriy oy).
     """
     denied = require_permission(request, "cash.view")
     if denied:
         return denied
 
-    month = (request.GET.get("month") or tashkent_today().strftime("%Y-%m")).strip()
     try:
-        year, mon = month.split("-")
-        year, mon = int(year), int(mon)
-    except (ValueError, AttributeError):
-        return JsonResponse({"error": "month format 'YYYY-MM' bo'lishi kerak"}, status=400)
+        start, end, months = _range_months(request)
+    except RangeError as e:
+        return JsonResponse({"error": str(e)}, status=400)
 
-    qs = CashSession.objects.filter(date__year=year, date__month=mon)
+    qs = apply_date_range(CashSession.objects.all(), "date", start, end)
     sessions = [_session_dict(s) for s in qs]
     closed = [s for s in sessions if s["status"] == CashSession.STATUS_CLOSED]
+
+    # Oylik yig'im rejasi bir oyga tegishli — oraliq bir necha oyga
+    # cho'zilsa oxirgisini ko'rsatamiz (frontend oy tanlaganda shu bo'ladi)
+    month = months[-1] if months else tashkent_today().strftime("%Y-%m")
 
     summary = {
         "month": month,
@@ -3908,6 +4777,7 @@ def get_cash_sessions(request):
         {
             "summary": summary,
             "sessions": sessions,
+            "range": range_payload(start, end),
             # Shu oy qancha yig'ilishi kerak edi / qancha yig'ildi
             "plan": month_collection_plan(month),
         }
@@ -4343,6 +5213,87 @@ def get_group(request, group_id):
         return JsonResponse({"error": str(e)}, status=500)
 
 
+def _as_time(value):
+    """'HH:MM' matn yoki time obyektidan time qaytaradi (xato bo'lsa None)."""
+    if value is None or isinstance(value, dtime):
+        return value
+    try:
+        h, m = str(value).split(":")[:2]
+        return dtime(int(h), int(m))
+    except (ValueError, TypeError):
+        return None
+
+
+def _resolve_level(data, course):
+    """(level, error). `level_id` bo'sh bo'lsa darajasiz — bu xato emas."""
+    raw = data.get("level_id")
+    if raw in (None, "", 0, "0"):
+        return None, None
+    try:
+        level = CourseLevel.objects.filter(id=int(raw)).first()
+    except (ValueError, TypeError):
+        return None, "level_id son bo'lishi kerak"
+    if not level:
+        return None, "Daraja topilmadi"
+    if course and level.course_id != course.id:
+        return None, f"«{level.name}» darajasi «{course.name}» kursiga tegishli emas"
+    return level, None
+
+
+def _resolve_room(data, current=None):
+    """(room_ref, room_text, error).
+
+    Ikki usul qo'llab-quvvatlanadi: `room_id` — ro'yxatdagi xona (afzal),
+    `room` — erkin matn (eski mijozlar va import uchun). Xona tanlansa
+    matn maydoni ham uning nomi bilan to'ldiriladi, chunki hamma
+    ko'rinishlar `group.room` ni o'qiydi.
+    """
+    if "room_id" in data:
+        raw = data.get("room_id")
+        if raw in (None, "", 0, "0"):
+            return None, str(data.get("room") or "").strip()[:50], None
+        try:
+            room = Room.objects.filter(id=int(raw)).first()
+        except (ValueError, TypeError):
+            return None, "", "room_id son bo'lishi kerak"
+        if not room:
+            return None, "", "Xona topilmadi"
+        return room, room.name, None
+
+    text = str(data.get("room") or "").strip()
+    if len(text) > 50:
+        return None, "", "Xona nomi 50 belgidan ortiq bo'lishi mumkin emas"
+    # Matn ro'yxatdagi xona nomiga to'g'ri kelsa uni bog'lab qo'yamiz —
+    # eski guruhlar ham asta-sekin ro'yxatga o'tadi
+    match = Room.objects.filter(name__iexact=text).first() if text else None
+    if match:
+        return match, match.name, None
+    return (None if text else (current.room_ref if current else None)), text, None
+
+
+def _resolve_duration(data):
+    """(daqiqa, error). Berilmasa 90 — odatdagi dars uzunligi."""
+    raw = data.get("duration_minutes")
+    if raw in (None, ""):
+        return 90, None
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        return 90, "duration_minutes son bo'lishi kerak"
+    if not (10 <= value <= 600):
+        return 90, "duration_minutes 10 va 600 daqiqa orasida bo'lishi kerak"
+    return value, None
+
+
+def _conflict_message(room, conflicts):
+    names = ", ".join(f"{c['name']} ({c['lesson_time']})" for c in conflicts[:3])
+    room_name = room.name if room else "Xona"
+    return (
+        f"«{room_name}» shu vaqtda band: {names}. "
+        "Boshqa vaqt yoki xona tanlang (yoki «force» bilan baribir saqlang)."
+    )
+
+
 @csrf_exempt
 def create_group(request):
     """Yangi guruh yaratish.
@@ -4351,10 +5302,13 @@ def create_group(request):
         name: "Guruh nomi",
         teacher_id: <id>,
         course_id: <id>,
+        level_id: <id>,            # kurs darajasi (ixtiyoriy)
         lesson_time: "HH:MM" (default: "09:00"),
-        room: "xona",
+        duration_minutes: 90,      # xona bandligini tekshirish uchun
+        room_id: <id>,             # ro'yxatdagi xona (yoki eski usulda room: "matn")
         schedule: "odd" | "even",
-        students: [<id>, <id>, ...]
+        students: [<id>, <id>, ...],
+        force: true                # xona band bo'lsa ham saqlash
     }
     """
     if request.method != "POST":
@@ -4415,19 +5369,39 @@ def create_group(request):
                 status=400,
             )
 
-        # ✅ Xona validation
-        room = data.get("room", "").strip()
-        if len(room) > 50:
-            return JsonResponse(
-                {"error": "Xona nomi 50 belgidan ortiq bo'lishi mumkin emas"},
-                status=400,
-            )
+        # ✅ Daraja validation — kursning o'z darajasi bo'lishi shart
+        level, level_err = _resolve_level(data, course)
+        if level_err:
+            return JsonResponse({"error": level_err}, status=400)
+
+        # ✅ Xona — ro'yxatdan (room_id) yoki eski usulda matn (room)
+        room_ref, room, room_err = _resolve_room(data)
+        if room_err:
+            return JsonResponse({"error": room_err}, status=400)
 
         # ✅ Schedule validation
         schedule = data.get("schedule", "odd").strip()
         if schedule not in ["odd", "even", "daily"]:
             return JsonResponse(
                 {"error": "schedule 'odd' yoki 'even' bo'lishi kerak"}, status=400
+            )
+
+        duration, dur_err = _resolve_duration(data)
+        if dur_err:
+            return JsonResponse({"error": dur_err}, status=400)
+
+        # ✅ Xona bandligi — bir vaqtda bir xonada ikki guruh bo'lmasin.
+        # `force: true` bilan menejer baribir davom ettira oladi (masalan
+        # katta zal ikkiga bo'lingan bo'lsa).
+        conflicts = room_conflicts(room_ref, schedule, _as_time(lesson_time), duration)
+        if conflicts and not data.get("force"):
+            return JsonResponse(
+                {
+                    "error": _conflict_message(room_ref, conflicts),
+                    "code": "room_busy",
+                    "conflicts": conflicts,
+                },
+                status=409,
             )
 
         # ✅ Guruh ochilgan sana (ixtiyoriy) — oylik to'lov shu kundan boshlanadi
@@ -4468,8 +5442,11 @@ def create_group(request):
                 name=name,
                 teacher=teacher,
                 course=course,
+                level=level,
                 lesson_time=lesson_time,
                 room=room,
+                room_ref=room_ref,
+                duration_minutes=duration,
                 schedule=schedule,
                 opened_date=opened_date,
             )
@@ -4534,10 +5511,27 @@ def update_group(request, group_id):
                 group.course = Course.objects.filter(id=int(data["course_id"])).first()
             except ValueError:
                 group.course = None
+            # Kurs almashtirilsa eski kursning darajasi bu yerda o'rinsiz
+            if group.level_id and group.level.course_id != group.course_id:
+                group.level = None
+        if "level_id" in data:
+            level, level_err = _resolve_level(data, group.course)
+            if level_err:
+                return JsonResponse({"error": level_err}, status=400)
+            group.level = level
         if "lesson_time" in data:
             group.lesson_time = data["lesson_time"].strip()
-        if "room" in data:
-            group.room = data["room"].strip()
+        if "room_id" in data or "room" in data:
+            room_ref, room_text, room_err = _resolve_room(data, current=group)
+            if room_err:
+                return JsonResponse({"error": room_err}, status=400)
+            group.room_ref = room_ref
+            group.room = room_text
+        if "duration_minutes" in data:
+            duration, dur_err = _resolve_duration(data)
+            if dur_err:
+                return JsonResponse({"error": dur_err}, status=400)
+            group.duration_minutes = duration
         if "schedule" in data:
             schedule = data["schedule"].strip()
             if schedule in ["odd", "even", "daily"]:
@@ -4547,6 +5541,25 @@ def update_group(request, group_id):
             if opened_err:
                 return JsonResponse({"error": opened_err}, status=400)
             group.opened_date = opened_date
+
+        # Xona, vaqt yoki kunlar o'zgargan bo'lsa bandlikni qayta tekshiramiz
+        if {"room_id", "room", "lesson_time", "schedule", "duration_minutes"} & set(data):
+            conflicts = room_conflicts(
+                group.room_ref,
+                group.schedule,
+                _as_time(group.lesson_time),
+                group.duration_minutes,
+                exclude_group_id=group.id,
+            )
+            if conflicts and not data.get("force"):
+                return JsonResponse(
+                    {
+                        "error": _conflict_message(group.room_ref, conflicts),
+                        "code": "room_busy",
+                        "conflicts": conflicts,
+                    },
+                    status=409,
+                )
 
         # Menejer guruhni tahrirlab saqladi — import qo'ygan "tekshirish kerak"
         # belgisi endi keraksiz
@@ -5562,6 +6575,435 @@ def delete_course(request, course_id):
         return JsonResponse({"error": str(e)}, status=400)
 
 
+# ─────────────────────────────
+# COURSE LEVELS (Kurs darajalari)
+#
+# Bitta kurs bir necha darajaga bo'linadi ("Beginner", "A1", "2-modul")
+# va ko'pincha yuqorisi qimmatroq turadi. Daraja narxi kiritilmasa
+# (0) kursning umumiy narxi amal qiladi — ya'ni daraja qo'shish
+# mavjud narxlarni buzmaydi.
+# ─────────────────────────────
+
+
+def _levels_students(level):
+    """Shu darajadagi guruhlarning o'quvchilari — narx o'zgarganda resync uchun."""
+    return (
+        Student.objects.filter(groups__level=level)
+        .distinct()
+        .prefetch_related("payments", "groups__course", "groups__level")
+    )
+
+
+def get_course_levels(request, course_id):
+    """Kursning darajalari."""
+    course = Course.objects.filter(id=course_id).first()
+    if not course:
+        return JsonResponse({"error": "Kurs topilmadi"}, status=404)
+    return JsonResponse(
+        CourseLevelSerializer(course.levels.all(), many=True).data, safe=False
+    )
+
+
+@csrf_exempt
+def create_course_level(request, course_id):
+    """Kursga daraja qo'shish. Body: {name, monthly_fee?, order?, note?}"""
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_permission(request, "courses.edit")
+    if denied:
+        return denied
+    try:
+        course = Course.objects.filter(id=course_id).first()
+        if not course:
+            return JsonResponse({"error": "Kurs topilmadi"}, status=404)
+
+        data = json.loads(request.body or "{}")
+        name = str(data.get("name") or "").strip()
+        if not name:
+            return JsonResponse({"error": "Daraja nomi kiritilishi shart"}, status=400)
+        if course.levels.filter(name__iexact=name).exists():
+            return JsonResponse(
+                {"error": f"«{name}» darajasi bu kursda allaqachon bor"}, status=400
+            )
+
+        try:
+            monthly_fee = max(0, int(data.get("monthly_fee") or 0))
+            order = int(data.get("order") or course.levels.count())
+        except (ValueError, TypeError):
+            return JsonResponse(
+                {"error": "monthly_fee va order son bo'lishi kerak"}, status=400
+            )
+
+        level = CourseLevel.objects.create(
+            course=course,
+            name=name,
+            monthly_fee=monthly_fee,
+            order=order,
+            note=str(data.get("note") or "").strip()[:255],
+        )
+        log_action(
+            request,
+            "course.update",
+            f"«{course.name}» kursiga «{name}» darajasi qo'shildi"
+            + (f" — oylik {monthly_fee:,} so'm".replace(",", " ") if monthly_fee else ""),
+            target_type="course",
+            target_id=course.id,
+            target_name=course.name,
+            level=name,
+            monthly_fee=monthly_fee,
+        )
+        return JsonResponse(CourseLevelSerializer(level).data, status=201)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+@csrf_exempt
+def update_course_level(request, level_id):
+    """Darajani tahrirlash. Narx o'zgarsa to'lanmagan to'lovlar yangilanadi."""
+    if request.method != "PATCH":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_permission(request, "courses.edit")
+    if denied:
+        return denied
+    try:
+        level = CourseLevel.objects.select_related("course").filter(id=level_id).first()
+        if not level:
+            return JsonResponse({"error": "Daraja topilmadi"}, status=404)
+
+        data = json.loads(request.body or "{}")
+        fee_before = level.monthly_fee
+
+        if "name" in data:
+            name = str(data["name"] or "").strip()
+            if not name:
+                return JsonResponse({"error": "Daraja nomi bo'sh bo'lmasin"}, status=400)
+            clash = level.course.levels.filter(name__iexact=name).exclude(id=level.id)
+            if clash.exists():
+                return JsonResponse(
+                    {"error": f"«{name}» darajasi bu kursda allaqachon bor"}, status=400
+                )
+            level.name = name
+        if "monthly_fee" in data:
+            try:
+                level.monthly_fee = max(0, int(data["monthly_fee"] or 0))
+            except (ValueError, TypeError):
+                return JsonResponse(
+                    {"error": "monthly_fee son bo'lishi kerak"}, status=400
+                )
+        if "order" in data:
+            try:
+                level.order = int(data["order"] or 0)
+            except (ValueError, TypeError):
+                return JsonResponse({"error": "order son bo'lishi kerak"}, status=400)
+        if "note" in data:
+            level.note = str(data["note"] or "").strip()[:255]
+
+        level.save()
+
+        # Narx o'zgardi — shu darajadagi o'quvchilarning to'lanmagan
+        # to'lovlari joriy narxga keltiriladi (kurs narxidagi kabi reaktiv)
+        synced = 0
+        if level.monthly_fee != fee_before:
+            synced = resync_unpaid_amount_due(_levels_students(level))
+
+        log_action(
+            request,
+            "course.update",
+            f"«{level.course.name}» — «{level.name}» darajasi: "
+            + (
+                f"narx {fee_before:,} → {level.monthly_fee:,} so'm".replace(",", " ")
+                if level.monthly_fee != fee_before
+                else "ma'lumoti tahrirlandi"
+            ),
+            target_type="course",
+            target_id=level.course_id,
+            target_name=level.course.name,
+            level=level.name,
+            before=fee_before,
+            after=level.monthly_fee,
+            payments_synced=synced,
+        )
+        return JsonResponse(
+            {**CourseLevelSerializer(level).data, "payments_synced": synced}
+        )
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+@csrf_exempt
+def delete_course_level(request, level_id):
+    """Darajani o'chirish — unga bog'langan guruhlar darajasiz qoladi."""
+    if request.method != "DELETE":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_permission(request, "courses.edit")
+    if denied:
+        return denied
+    try:
+        level = CourseLevel.objects.select_related("course").filter(id=level_id).first()
+        if not level:
+            return JsonResponse({"error": "Daraja topilmadi"}, status=404)
+
+        groups = level.groups.count()
+        name, course = level.name, level.course
+        level.delete()  # Group.level = SET_NULL — guruhlar saqlanadi
+
+        log_action(
+            request,
+            "course.update",
+            f"«{course.name}» kursidan «{name}» darajasi o'chirildi"
+            + (f" — {groups} ta guruh darajasiz qoldi" if groups else ""),
+            target_type="course",
+            target_id=course.id,
+            target_name=course.name,
+            level=name,
+            groups_detached=groups,
+        )
+        return JsonResponse(
+            {"message": "Daraja o'chirildi", "groups_detached": groups}
+        )
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+# ─────────────────────────────
+# ROOMS (Xonalar)
+#
+# Xona ilgari guruhda oddiy matn edi — "204", "204-xona", "204 xona"
+# uch xil qator bo'lib, bir vaqtda bir xonaga ikki guruh qo'yilgani
+# faqat dars boshlanganda bilinardi. Endi xona ro'yxatdan tanlanadi
+# va bandlik tekshiriladi.
+# ─────────────────────────────
+
+
+def _minutes(t):
+    """time -> kun boshidan hisoblangan daqiqa."""
+    return t.hour * 60 + t.minute
+
+
+def room_conflicts(room, schedule, lesson_time, duration, exclude_group_id=None):
+    """Shu xonada, shu kunlarda, shu vaqtda dars o'tayotgan guruhlar.
+
+    Jadval "har kuni" bo'lsa toq va juft kunlar bilan ham to'qnashadi —
+    shuning uchun `daily` hammasiga mos keladi. Vaqt oralig'i
+    kesishishi bo'yicha tekshiramiz: [boshlanish, boshlanish+davomiylik).
+    """
+    if not room or not lesson_time:
+        return []
+
+    qs = Group.objects.filter(room_ref=room).select_related("teacher")
+    if exclude_group_id:
+        qs = qs.exclude(id=exclude_group_id)
+    if schedule != "daily":
+        qs = qs.filter(schedule__in=[schedule, "daily"])
+
+    start = _minutes(lesson_time)
+    finish = start + max(1, int(duration or 90))
+
+    hits = []
+    for g in qs:
+        if not g.lesson_time:
+            continue
+        g_start = _minutes(g.lesson_time)
+        g_finish = g_start + max(1, int(g.duration_minutes or 90))
+        if start < g_finish and g_start < finish:
+            hits.append(
+                {
+                    "id": g.id,
+                    "name": g.name,
+                    "teacher_name": g.teacher.name if g.teacher else "",
+                    "lesson_time": g.lesson_time.strftime("%H:%M"),
+                    "duration_minutes": g.duration_minutes,
+                    "schedule": g.schedule,
+                }
+            )
+    return hits
+
+
+def get_rooms(request):
+    """Xonalar ro'yxati. ?all=1 — o'chirilganlari ham."""
+    qs = Room.objects.all()
+    if request.GET.get("all") not in ("1", "true", "yes"):
+        qs = qs.filter(is_active=True)
+    return JsonResponse(RoomSerializer(qs, many=True).data, safe=False)
+
+
+@csrf_exempt
+def create_room(request):
+    """Yangi xona. Body: {name, capacity?, note?}"""
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_permission(request, "groups.edit")
+    if denied:
+        return denied
+    try:
+        data = json.loads(request.body or "{}")
+        name = str(data.get("name") or "").strip()
+        if not name:
+            return JsonResponse({"error": "Xona nomi kiritilishi shart"}, status=400)
+        if len(name) > 50:
+            return JsonResponse(
+                {"error": "Xona nomi 50 belgidan oshmasin"}, status=400
+            )
+        if Room.objects.filter(name__iexact=name).exists():
+            return JsonResponse({"error": f"«{name}» xonasi allaqachon bor"}, status=400)
+
+        try:
+            capacity = max(0, int(data.get("capacity") or 0))
+        except (ValueError, TypeError):
+            return JsonResponse({"error": "capacity son bo'lishi kerak"}, status=400)
+
+        room = Room.objects.create(
+            name=name, capacity=capacity, note=str(data.get("note") or "").strip()[:255]
+        )
+        log_action(
+            request,
+            "group.update",
+            f"«{name}» xonasi qo'shildi"
+            + (f" — {capacity} o'rinli" if capacity else ""),
+            target_type="room",
+            target_id=room.id,
+            target_name=name,
+            capacity=capacity,
+        )
+        return JsonResponse(RoomSerializer(room).data, status=201)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+@csrf_exempt
+def update_room(request, room_id):
+    """Xonani tahrirlash. Nomi o'zgarsa guruhlardagi matn ham yangilanadi."""
+    if request.method != "PATCH":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_permission(request, "groups.edit")
+    if denied:
+        return denied
+    try:
+        room = Room.objects.filter(id=room_id).first()
+        if not room:
+            return JsonResponse({"error": "Xona topilmadi"}, status=404)
+
+        data = json.loads(request.body or "{}")
+        if "name" in data:
+            name = str(data["name"] or "").strip()
+            if not name:
+                return JsonResponse({"error": "Xona nomi bo'sh bo'lmasin"}, status=400)
+            if Room.objects.filter(name__iexact=name).exclude(id=room.id).exists():
+                return JsonResponse(
+                    {"error": f"«{name}» xonasi allaqachon bor"}, status=400
+                )
+            room.name = name[:50]
+        if "capacity" in data:
+            try:
+                room.capacity = max(0, int(data["capacity"] or 0))
+            except (ValueError, TypeError):
+                return JsonResponse({"error": "capacity son bo'lishi kerak"}, status=400)
+        if "note" in data:
+            room.note = str(data["note"] or "").strip()[:255]
+        if "is_active" in data:
+            room.is_active = bool(data["is_active"])
+
+        room.save()
+        # Guruhdagi matn maydoni ko'rinishlarda o'qiladi — nom o'zgarsa
+        # u ham yangilanmasa eski nom ekranda qolib ketardi
+        room.groups.update(room=room.name)
+
+        log_action(
+            request,
+            "group.update",
+            f"«{room.name}» xonasi tahrirlandi",
+            target_type="room",
+            target_id=room.id,
+            target_name=room.name,
+            fields=sorted(data.keys()),
+        )
+        return JsonResponse(RoomSerializer(room).data)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+@csrf_exempt
+def delete_room(request, room_id):
+    """Xonani o'chirish — guruhlar xonasiz qoladi (dars jadvali buzilmaydi)."""
+    if request.method != "DELETE":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = require_permission(request, "groups.edit")
+    if denied:
+        return denied
+    try:
+        room = Room.objects.filter(id=room_id).first()
+        if not room:
+            return JsonResponse({"error": "Xona topilmadi"}, status=404)
+        groups = room.groups.count()
+        name = room.name
+        room.groups.update(room="")
+        room.delete()  # Group.room_ref = SET_NULL
+        log_action(
+            request,
+            "group.update",
+            f"«{name}» xonasi o'chirildi"
+            + (f" — {groups} ta guruh xonasiz qoldi" if groups else ""),
+            target_type="room",
+            target_id=room_id,
+            target_name=name,
+            groups_detached=groups,
+        )
+        return JsonResponse({"message": "Xona o'chirildi", "groups_detached": groups})
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+
+def get_room_schedule(request):
+    """Xonalar bandligi — kim, qachon, qaysi xonada.
+
+    Menejer guruh ochishdan oldin bo'sh xonani shu ro'yxatdan ko'radi.
+    """
+    rooms = list(Room.objects.filter(is_active=True))
+    groups = list(
+        Group.objects.select_related("teacher", "room_ref", "course").order_by(
+            "lesson_time"
+        )
+    )
+    by_room = {}
+    for g in groups:
+        by_room.setdefault(g.room_ref_id, []).append(
+            {
+                "id": g.id,
+                "name": g.name,
+                "teacher_name": g.teacher.name if g.teacher else "",
+                "course_name": g.course.name if g.course_id else "",
+                "lesson_time": g.lesson_time.strftime("%H:%M") if g.lesson_time else "",
+                "duration_minutes": g.duration_minutes,
+                "schedule": g.schedule,
+            }
+        )
+    return JsonResponse(
+        {
+            "rooms": [
+                {
+                    "id": r.id,
+                    "name": r.name,
+                    "capacity": r.capacity,
+                    "note": r.note,
+                    "groups": by_room.get(r.id, []),
+                }
+                for r in rooms
+            ],
+            # Xonaga biriktirilmagan guruhlar — menejer ularni ham
+            # joylashtirishi kerakligini ko'rsin
+            "unassigned": by_room.get(None, []),
+        }
+    )
+
+
 class IsManagerOrReadOnly(permissions.BasePermission):
     """Faqat admin/excellence yozishi, o'chirishi, o'zgartirishi mumkin."""
 
@@ -5873,22 +7315,21 @@ def delete_news(request, news_id):
 
 
 def get_expenses(request):
-    """Barcha xarajatlar (ixtiyoriy: oy bo'yicha filter)."""
+    """Barcha xarajatlar.
+
+    Davr: ?from=&to= / ?month= / ?year= (tanlanmasa hammasi).
+    """
     denied = require_super(request)
     if denied:
         return denied
     try:
-        month = request.GET.get("month", "").strip()
         qs = Expense.objects.all().order_by("-date", "-created_at")
 
-        if month:
-            try:
-                year, mon = month.split("-")
-                qs = qs.filter(date__year=int(year), date__month=int(mon))
-            except ValueError:
-                return JsonResponse(
-                    {"error": "month format 'YYYY-MM' bo'lishi kerak"}, status=400
-                )
+        try:
+            start, end = parse_range(request)
+        except RangeError as e:
+            return JsonResponse({"error": str(e)}, status=400)
+        qs = apply_date_range(qs, "date", start, end)
 
         data = [
             {
@@ -6643,11 +8084,26 @@ def send_message_students(request):
 
 
 def get_message_history(request):
-    """Yuborilgan xabarlar tarixi (oxirgi 200 ta)."""
+    """Yuborilgan xabarlar tarixi.
+
+    Davr: ?from=&to= / ?month= / ?year= (tanlanmasa — oxirgi 200 ta).
+    """
     try:
         from .models import SentMessage
 
-        qs = SentMessage.objects.select_related("student")[:200]
+        try:
+            start, end = parse_range(request)
+        except RangeError as e:
+            return JsonResponse({"error": str(e)}, status=400)
+
+        qs = apply_datetime_range(
+            SentMessage.objects.select_related("student"), "created_at", start, end
+        )
+        try:
+            limit = min(1000, max(1, int(request.GET.get("limit") or 200)))
+        except ValueError:
+            limit = 200
+        qs = qs[:limit]
         data = [
             {
                 "id": m.id,
@@ -6658,11 +8114,11 @@ def get_message_history(request):
                 "text": m.text[:120],
                 "status": m.status,
                 "error": m.error,
-                "created_at": m.created_at.strftime("%Y-%m-%d %H:%M"),
+                "created_at": (m.created_at + TASHKENT_OFFSET).strftime("%Y-%m-%d %H:%M"),
             }
             for m in qs
         ]
-        return JsonResponse({"messages": data})
+        return JsonResponse({"messages": data, "range": range_payload(start, end)})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 

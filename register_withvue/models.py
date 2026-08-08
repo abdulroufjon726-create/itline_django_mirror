@@ -106,6 +106,20 @@ class Student(models.Model):
         ("daily", "Har kuni"),
     ]
 
+    # O'quvchining qabul holati. Ro'yxatga olingan har bir odam darhol
+    # o'qiy boshlamaydi: kimdir sinov darsini kutadi, kimga qayta
+    # qo'ng'iroq qilish kerak. Ilgari bunday odam ham "o'quvchi" bo'lib
+    # ro'yxatda turardi va menejer kim bilan ishlash kerakligini
+    # ajrata olmasdi.
+    #
+    # Faqat `active` haqiqiy o'quvchi hisoblanadi — to'lov yaratish,
+    # oylik yig'im rejasi va ustoz oyligi shu holatga tayanadi.
+    STATUS_CHOICES = [
+        ("pending", "Kutilmoqda"),
+        ("contact", "Bog'lanish kerak"),
+        ("active", "Faol"),
+    ]
+
     name = models.CharField(max_length=100)
     surname = models.CharField(max_length=100)
     # Bitiruvchida raqam saqlanmaydi — undan faqat ism-familiya qoladi.
@@ -135,6 +149,22 @@ class Student(models.Model):
     is_admin = models.BooleanField(default=False)
     is_excellence = models.BooleanField(default=False)
     is_graduate = models.BooleanField(default=False, verbose_name="Bitiruvchi")
+
+    status = models.CharField(
+        max_length=10,
+        choices=STATUS_CHOICES,
+        default="active",
+        db_index=True,
+        verbose_name="Holat",
+    )
+    # Holat oxirgi marta qachon o'zgargani — "5 kundan beri javob
+    # bermayapti" kabi ro'yxatlarni shu orqali chiqarish mumkin
+    status_changed_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="Holat o'zgargan sana"
+    )
+    status_note = models.CharField(
+        max_length=255, blank=True, default="", verbose_name="Holat izohi"
+    )
 
     # Ustoz menejer paneli orqali qo'lda almashtirilgan. Sheet qayta
     # import qilinganda import qilingan o'quvchilar o'chirilib qayta
@@ -527,6 +557,75 @@ class Course(models.Model):
         return self.name
 
 
+class CourseLevel(models.Model):
+    """Kursning darajasi (bosqichi) — masalan "Beginner", "A1", "2-modul".
+
+    Bitta kurs bir necha darajaga bo'linadi va ko'pincha yuqori daraja
+    qimmatroq turadi. `monthly_fee` 0 bo'lsa kursning umumiy narxi
+    ishlatiladi — ya'ni daraja qo'shish narxni buzmaydi, faqat farq
+    bo'lganda kiritiladi.
+
+    Guruh darajaga bog'lanadi (`Group.level`); o'quvchining oylik to'lovi
+    shu tartibda aniqlanadi: daraja narxi → kurs narxi → etap narxi.
+    """
+
+    course = models.ForeignKey(
+        Course, on_delete=models.CASCADE, related_name="levels", verbose_name="Kurs"
+    )
+    name = models.CharField(max_length=100, verbose_name="Daraja nomi")
+    # Ro'yxatda ko'rsatish tartibi — "Beginner" "Advanced" dan oldin tursin
+    order = models.IntegerField(default=0, verbose_name="Tartib")
+    monthly_fee = models.IntegerField(
+        default=0, verbose_name="Oylik to'lov (0 = kurs narxi)"
+    )
+    note = models.CharField(max_length=255, blank=True, verbose_name="Izoh")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("course", "name")
+        ordering = ["order", "id"]
+        verbose_name = "Kurs darajasi"
+        verbose_name_plural = "Kurs darajalari"
+
+    def __str__(self):
+        return f"{self.course.name} — {self.name}"
+
+    @property
+    def effective_fee(self):
+        return int(self.monthly_fee or 0) or int(self.course.monthly_fee or 0)
+
+
+# ─────────────────────────────────────────
+# ROOM (Xonalar)
+# ─────────────────────────────────────────
+
+
+class Room(models.Model):
+    """O'quv xonasi.
+
+    Ilgari xona guruhda oddiy matn edi ("204", "204-xona", "204 xona" —
+    hammasi boshqa-boshqa qator) va bir vaqtda bir xonaga ikki guruh
+    qo'yilib qolgani faqat dars boshlanganda ma'lum bo'lardi. Endi xona
+    alohida yozuv: ro'yxatdan tanlanadi va bandlik tekshiriladi.
+    """
+
+    name = models.CharField(max_length=50, unique=True, verbose_name="Xona nomi")
+    capacity = models.IntegerField(default=0, verbose_name="Sig'imi (0 = cheklanmagan)")
+    note = models.CharField(max_length=255, blank=True, verbose_name="Izoh")
+    is_active = models.BooleanField(default=True, verbose_name="Faol")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name = "Xona"
+        verbose_name_plural = "Xonalar"
+
+    def __str__(self):
+        return self.name
+
+
 # ─────────────────────────────────────────
 # GROUP
 # ─────────────────────────────────────────
@@ -545,7 +644,25 @@ class Group(models.Model):
     )
     students = models.ManyToManyField(Student, related_name="groups")
     lesson_time = models.TimeField(null=False, blank=False)
+    # Xona nomi matn ko'rinishida — eski yozuvlar va import qilingan
+    # guruhlar shu yerda qoladi. Xona ro'yxatdan tanlansa `room_ref`
+    # to'ldiriladi va bu maydon uning nomi bilan bir xil turadi (barcha
+    # eski ko'rinishlar `group.room` ni o'qiydi).
     room = models.CharField(max_length=50, blank=True, default="", verbose_name="Xona")
+    room_ref = models.ForeignKey(
+        "Room",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="groups",
+        verbose_name="Xona (ro'yxatdan)",
+    )
+    # Dars davomiyligi — xona bandligini tekshirishda ishlatiladi
+    # (10:00 da boshlanadigan 90 daqiqalik dars 11:00 dagi darsga xalaqit
+    # beradi, lekin 12:00 dagiga yo'q).
+    duration_minutes = models.IntegerField(
+        default=90, verbose_name="Dars davomiyligi (daqiqa)"
+    )
 
     # Guruh ochilgan (birinchi dars boshlangan) sana. Oylik to'lov shu
     # kundan boshlab hisoblanadi — masalan 25-kuni ochilgan guruhning
@@ -560,6 +677,16 @@ class Group(models.Model):
         blank=True,
         related_name="groups",
         verbose_name=_("Course"),
+    )
+    # Kursning qaysi darajasi o'qitiladi. Narxi bo'lsa oylik to'lov shu
+    # darajadan olinadi (kurs narxidan ustun turadi).
+    level = models.ForeignKey(
+        "CourseLevel",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="groups",
+        verbose_name="Daraja",
     )
 
     schedule = models.CharField(
@@ -584,6 +711,22 @@ class Group(models.Model):
 
     def __str__(self):
         return self.name
+
+    @property
+    def effective_monthly_fee(self):
+        """Guruhning haqiqiy oylik to'lovi: daraja narxi → kurs narxi → 0.
+
+        Daraja narxi kursnikidan ustun turadi — bitta kursning "Beginner"
+        va "Advanced" guruhlari har xil turishi mumkin. Darajada narx
+        kiritilmagan (0) bo'lsa kursning umumiy narxi ishlatiladi.
+        """
+        if self.level_id:
+            fee = int(getattr(self.level, "monthly_fee", 0) or 0)
+            if fee:
+                return fee
+        if self.course_id:
+            return int(getattr(self.course, "monthly_fee", 0) or 0)
+        return 0
 
 
 # ─────────────────────────────────────────

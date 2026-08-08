@@ -27,6 +27,12 @@ from .access import (
     phone_key,
     require_super,
 )
+from .views import (
+    RangeError,
+    apply_datetime_range,
+    parse_range,
+    range_payload,
+)
 from .models import (
     ActivityLog,
     Expense,
@@ -1038,6 +1044,7 @@ def get_activity(request):
     """Panelda kim nima qilgani.
 
     Filtrlar: ?manager_id= ?action= ?days= ?search= ?limit= ?before_id=
+    va sana oralig'i: ?from=&to= / ?month= / ?year=.
     `before_id` — "yana yuklash" uchun: shu ID'dan eskiroqlari qaytadi.
     """
     denied = require_super(request)
@@ -1045,6 +1052,12 @@ def get_activity(request):
         return denied
 
     qs = ActivityLog.objects.all()
+
+    try:
+        start, end = parse_range(request)
+    except RangeError as e:
+        return JsonResponse({"error": str(e)}, status=400)
+    qs = apply_datetime_range(qs, "created_at", start, end)
 
     manager_id = request.GET.get("manager_id")
     if manager_id:
@@ -1113,6 +1126,7 @@ def get_activity(request):
             "rows": rows,
             "actions": action_catalog(),
             "has_more": len(rows) == limit,
+            "range": range_payload(start, end),
         }
     )
 

@@ -1172,6 +1172,9 @@ def create_teacher(request):
         if not name:
             return JsonResponse({"error": "Ism kiritilishi shart"}, status=400)
 
+        # Boshlang'ich parol — rol kodining o'zi. Ustoz shu bilan kiradi va
+        # profilida o'zinikiga almashtiradi; almashtirmaguncha panelda
+        # eslatma turadi.
         teacher = Teacher.objects.create(
             name=name,
             phone=phone,
@@ -1187,7 +1190,15 @@ def create_teacher(request):
             target_name=name,
         )
         return JsonResponse(
-            {"id": teacher.id, "name": teacher.name, "phone": teacher.phone}, status=201
+            {
+                "id": teacher.id,
+                "name": teacher.name,
+                "phone": teacher.phone,
+                # Panel shu qiymatni ko'rsatadi — matnni qotirib qo'ymasin,
+                # aks holda kod almashsa ekranda eski parol qolib ketadi
+                "initial_password": ADMIN_PASSWORD,
+            },
+            status=201,
         )
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
@@ -3038,6 +3049,12 @@ def login_student(request):
                     "stage": student.stage,
                     "schedule": student.schedule,
                     "coin_balance": student.coin_balance,
+                    # Hali rol kodi bilan kiryapti — panelda "parolingizni
+                    # almashtiring" eslatmasi shu bayroqqa qarab chiqadi.
+                    # Ilgari frontend kodni o'zi solishtirardi; server
+                    # aytgani ishonchliroq (kod o'zgarsa ham to'g'ri qoladi).
+                    "used_default_password": password
+                    in (ADMIN_PASSWORD, EXCELLENCE_PASSWORD),
                 }
             )
 
@@ -3059,11 +3076,19 @@ def login_student(request):
                     "exists": True,
                     "id": teacher.id,
                     "name": teacher.name,
+                    "surname": "",
                     "phone": teacher.phone,
                     "teacher_id": teacher.id,
-                    "is_admin": False,
+                    # Bu loyihada ustoz "admin" darajasida hisoblanadi —
+                    # ustoz paneli (/admin) shu bayroq bilan ochiladi.
+                    # Ilgari False qaytardi va "Ustozlar" sahifasidan
+                    # qo'shilgan ustoz o'quvchilar sahifasiga tushib
+                    # qolardi (register formasi orqali qo'shilganida esa
+                    # Student.is_admin bo'lgani uchun to'g'ri ishlardi).
+                    "is_admin": True,
                     "is_excellence": teacher.is_senior,
                     "role": "teacher",
+                    "used_default_password": password == ADMIN_PASSWORD,
                 }
             )
 
@@ -3245,33 +3270,59 @@ def update_attendance(request, attendance_id):
             return JsonResponse({"error": "Noto'g'ri status"}, status=400)
 
         old_status = attendance.status
+        attendance_coins = get_attendance_coins_map()
 
-        if new_status == old_status:
+        # Shu davomat yozuvi uchun HAQIQATDA berilgan coin (jamlanma).
+        #
+        # Ilgari eski status sozlamadagi qiymati bo'yicha "bekor" qilinardi
+        # va bu ikki joyda buzilardi:
+        #
+        #   1. Dars ochilganda har o'quvchiga 'absent' yozuvi tayyorlab
+        #      qo'yiladi, lekin coin berilmaydi — bu "hali belgilanmagan"
+        #      degani. Ustoz keyin "kech keldi" bossa, hech qachon
+        #      berilmagan "kelmadi" coini qaytarib olinardi va balans
+        #      yo'qdan o'zgarardi (aynan shu -coin shikoyati).
+        #   2. Sozlama o'zgargan bo'lsa (masalan kelmadi 10 dan 15 ga)
+        #      eski status yangi qiymat bilan bekor qilinib, farqi
+        #      balansda qolib ketardi.
+        #
+        # Jurnalning o'zi yagona ishonchli manba: qancha berilgan bo'lsa,
+        # shuncha qaytariladi.
+        applied = (
+            CoinTransaction.objects.filter(attendance=attendance).aggregate(
+                s=Sum("amount")
+            )["s"]
+            or 0
+        )
+        target = attendance_coins.get(new_status, 0)
+
+        # Status ham, coin ham o'zgarmasa — tegmaymiz. Status bir xil-u
+        # coin hali berilmagan bo'lsa (yuqoridagi 1-holat) beriladi.
+        if new_status == old_status and applied == target:
             return JsonResponse(
                 {
                     "message": "Status o'zgarmadi",
+                    "status": attendance.status,
                     "coin_balance": attendance.student.coin_balance,
                 }
             )
 
-        attendance_coins = get_attendance_coins_map()
-
         with transaction.atomic():
             student = attendance.student
 
-            if old_status in attendance_coins:
+            if applied:
                 apply_coin_transaction(
                     student,
-                    -attendance_coins[old_status],
+                    -applied,
                     ATTENDANCE_REASON.get(old_status, "manual"),
                     note=f"Status '{old_status}' bekor qilindi",
                     attendance=attendance,
                 )
 
-            if new_status in attendance_coins:
+            if target:
                 apply_coin_transaction(
                     student,
-                    attendance_coins[new_status],
+                    target,
                     ATTENDANCE_REASON.get(new_status, "manual"),
                     note=f"Status: {new_status}",
                     attendance=attendance,

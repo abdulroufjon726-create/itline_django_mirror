@@ -18,6 +18,7 @@ from django.test.client import RequestFactory
 
 from . import views
 from .models import (
+    AttendanceCoinSettings,
     CashEntry,
     CashSession,
     Course,
@@ -640,3 +641,252 @@ class StudentImportTests(ApiCase):
             content_type="application/json",
         )
         self.assertEqual(views.import_students(stranger).status_code, 403)
+
+
+# ─────────────────────────────────────────
+# USTOZ QO'SHISH → KIRISH → PAROLNI ALMASHTIRISH
+#
+# Uch bo'g'in bir zanjir: "Ustozlar" sahifasidan qo'shilgan ustoz rol
+# kodi bilan kiradi, ustoz paneliga tushadi va profilida parolini
+# almashtiradi. Ilgari zanjir birinchi bo'g'inda uzilardi — rol kodi
+# muhit o'zgaruvchisidan kelardi va u sozlanmagani uchun ustozga parol
+# sifatida bo'sh satr yozilib qolardi.
+# ─────────────────────────────────────────
+
+
+class TeacherLoginChainTests(ApiCase):
+    def _login(self, phone, password):
+        return views.login_student(
+            self.rf.post(
+                "/api/login/",
+                data=json.dumps({"phone": phone, "password": password}),
+                content_type="application/json",
+            )
+        )
+
+    def _create_teacher(self, name="Jasur", phone="+998901234567"):
+        return views.create_teacher(
+            self.post("/api/teachers/create/", {"name": name, "phone": phone})
+        )
+
+    def test_role_codes_have_working_defaults(self):
+        """Frontend `ROLE_PASSWORDS` shu qiymatlarni biladi — mos turishi shart."""
+        self.assertEqual(views.ADMIN_PASSWORD, "excel2024")
+        self.assertEqual(views.EXCELLENCE_PASSWORD, "excellence2024")
+        self.assertNotEqual(views.ADMIN_PASSWORD, views.EXCELLENCE_PASSWORD)
+
+    def test_added_teacher_can_log_in_with_the_code(self):
+        resp = self._create_teacher()
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(self.body(resp)["initial_password"], "excel2024")
+
+        login = self._login("+998901234567", "excel2024")
+        self.assertEqual(login.status_code, 200)
+        data = self.body(login)
+        self.assertTrue(data["exists"])
+        self.assertEqual(data["role"], "teacher")
+
+    def test_teacher_lands_on_the_teacher_panel(self):
+        """`is_admin` bayrog'i ustoz panelini (/admin) ochadi."""
+        self._create_teacher()
+        data = self.body(self._login("+998901234567", "excel2024"))
+        self.assertTrue(data["is_admin"])
+        self.assertFalse(data["is_excellence"])
+
+    def test_senior_teacher_keeps_its_flag(self):
+        views.create_teacher(
+            self.post(
+                "/api/teachers/create/",
+                {"name": "Katta", "phone": "+998901234599", "is_senior": True},
+            )
+        )
+        data = self.body(self._login("+998901234599", "excel2024"))
+        self.assertTrue(data["is_excellence"])
+
+    def test_wrong_password_is_rejected(self):
+        self._create_teacher()
+        self.assertEqual(self._login("+998901234567", "boshqa").status_code, 401)
+
+    def test_default_password_warning_is_flagged(self):
+        self._create_teacher()
+        data = self.body(self._login("+998901234567", "excel2024"))
+        self.assertTrue(data["used_default_password"])
+
+    def test_warning_goes_away_after_changing_password(self):
+        self._create_teacher()
+        resp = views.change_password(
+            self.post(
+                "/api/change-password/",
+                {
+                    "phone": "+998901234567",
+                    "old_password": "excel2024",
+                    "new_password": "menikiParol1",
+                },
+            )
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        # Eski kod endi ishlamaydi, yangisi ishlaydi va eslatma so'nadi
+        self.assertEqual(self._login("+998901234567", "excel2024").status_code, 401)
+        data = self.body(self._login("+998901234567", "menikiParol1"))
+        self.assertTrue(data["exists"])
+        self.assertFalse(data["used_default_password"])
+        self.assertTrue(data["is_admin"])
+
+    def test_role_code_cannot_be_chosen_as_a_new_password(self):
+        self._create_teacher()
+        resp = views.change_password(
+            self.post(
+                "/api/change-password/",
+                {
+                    "phone": "+998901234567",
+                    "old_password": "excel2024",
+                    "new_password": "excellence2024",
+                },
+            )
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_register_form_creates_a_teacher_profile_with_the_code(self):
+        """Ro'yxatdan o'tish formasida kod yozilsa — ustoz profili ochiladi."""
+        resp = views.register_student(
+            self.post(
+                "/api/register/",
+                {
+                    "name": "Yangi",
+                    "surname": "Ustoz",
+                    "phone": "+998901111111",
+                    "password": "excel2024",
+                    "admin_password": "excel2024",
+                    "excellence_password": "excel2024",
+                },
+            )
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = self.body(resp)
+        self.assertTrue(data["is_admin"])
+        # excel2024 menejer kodi emas — menejer profili ochilmasligi kerak
+        self.assertFalse(data["is_excellence"])
+        self.assertTrue(Teacher.objects.filter(phone="+998901111111").exists())
+
+    def test_ordinary_student_password_does_not_grant_a_role(self):
+        resp = views.register_student(
+            self.post(
+                "/api/register/",
+                {
+                    "name": "Oddiy",
+                    "surname": "O'quvchi",
+                    "phone": "+998902222222",
+                    "password": "parol123",
+                    "admin_password": "parol123",
+                    "excellence_password": "parol123",
+                },
+            )
+        )
+        data = self.body(resp)
+        self.assertFalse(data["is_admin"])
+        self.assertFalse(data["is_excellence"])
+        self.assertFalse(Teacher.objects.filter(phone="+998902222222").exists())
+
+
+# ─────────────────────────────────────────
+# DAVOMAT COINLARI
+#
+# Dars ochilganda har o'quvchiga 'absent' yozuvi tayyorlab qo'yiladi —
+# bu "hali belgilanmagan" degani, coin berilmaydi. Ustoz keyin qaysi
+# tugmani bossa ham balans faqat haqiqatda berilgan coin bo'yicha
+# tuzatilishi kerak.
+# ─────────────────────────────────────────
+
+
+class AttendanceCoinTests(ApiCase):
+    def setUp(self):
+        super().setUp()
+        AttendanceCoinSettings.objects.create(
+            pk=1, present=10, late=5, absent=-15, payment_ontime=50, payment_grace_days=30
+        )
+        self.teacher = Teacher.objects.create(name="Jasur", phone="+998901234567")
+        self.group = Group.objects.create(
+            name="PY-1", lesson_time=time(10, 0), teacher=self.teacher, schedule="odd"
+        )
+        self.student = Student.objects.create(
+            name="Ali", surname="V", phone="+998900000051"
+        )
+        self.group.students.add(self.student)
+
+    def _open_board(self, day="2026-08-10"):
+        """Davomat sahifasini ochish — 'absent' yozuvlari shu payt yaratiladi."""
+        resp = views.attendance_group_day(
+            self.get("/api/attendance/group-day/", group_id=self.group.id, date=day)
+        )
+        return self.body(resp)["students"][0]["attendance_id"]
+
+    def _mark(self, attendance_id, status):
+        return views.update_attendance(
+            self.patch_("/x", {"status": status}), attendance_id=attendance_id
+        )
+
+    def _balance(self):
+        self.student.refresh_from_db(fields=["coin_balance"])
+        return self.student.coin_balance
+
+    def test_opening_the_board_gives_no_coins(self):
+        self._open_board()
+        self.assertEqual(self._balance(), 0)
+
+    def test_absent_then_late_does_not_invent_coins(self):
+        """Aynan shikoyat qilingan holat: adashib 'kelmadi', keyin 'kech keldi'."""
+        aid = self._open_board()
+        self._mark(aid, "absent")   # -15
+        self.assertEqual(self._balance(), -15)
+        self._mark(aid, "late")     # +15 qaytadi, +5 beriladi
+        self.assertEqual(self._balance(), 5)
+
+    def test_late_straight_from_a_fresh_row(self):
+        """Hech narsa bosilmagan 'absent' yozuvidan to'g'ridan-to'g'ri 'kech keldi'."""
+        aid = self._open_board()
+        self._mark(aid, "late")
+        # Berilmagan jarima qaytarilmasligi kerak — faqat +5
+        self.assertEqual(self._balance(), 5)
+
+    def test_pressing_absent_on_a_fresh_row_applies_the_penalty(self):
+        aid = self._open_board()
+        self._mark(aid, "absent")
+        self.assertEqual(self._balance(), -15)
+
+    def test_pressing_the_same_button_twice_changes_nothing(self):
+        aid = self._open_board()
+        self._mark(aid, "present")
+        self.assertEqual(self._balance(), 10)
+        self._mark(aid, "present")
+        self.assertEqual(self._balance(), 10)
+
+    def test_switching_between_statuses_stays_exact(self):
+        aid = self._open_board()
+        for status, expected in [
+            ("present", 10),
+            ("late", 5),
+            ("absent", -15),
+            ("present", 10),
+        ]:
+            self._mark(aid, status)
+            self.assertEqual(self._balance(), expected, status)
+
+    def test_settings_change_does_not_leave_a_residue(self):
+        """Sozlama o'zgargach eski status o'zining berilgan qiymati bilan qaytadi."""
+        aid = self._open_board()
+        self._mark(aid, "present")          # +10
+        self.assertEqual(self._balance(), 10)
+
+        s = AttendanceCoinSettings.get_settings()
+        s.present = 40
+        s.save()
+
+        self._mark(aid, "late")             # -10 (berilgani), +5
+        self.assertEqual(self._balance(), 5)
+
+    def test_marking_returns_the_fresh_balance(self):
+        aid = self._open_board()
+        data = self.body(self._mark(aid, "present"))
+        self.assertEqual(data["coin_balance"], 10)
+        self.assertEqual(data["status"], "present")

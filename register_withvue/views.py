@@ -3270,33 +3270,59 @@ def update_attendance(request, attendance_id):
             return JsonResponse({"error": "Noto'g'ri status"}, status=400)
 
         old_status = attendance.status
+        attendance_coins = get_attendance_coins_map()
 
-        if new_status == old_status:
+        # Shu davomat yozuvi uchun HAQIQATDA berilgan coin (jamlanma).
+        #
+        # Ilgari eski status sozlamadagi qiymati bo'yicha "bekor" qilinardi
+        # va bu ikki joyda buzilardi:
+        #
+        #   1. Dars ochilganda har o'quvchiga 'absent' yozuvi tayyorlab
+        #      qo'yiladi, lekin coin berilmaydi — bu "hali belgilanmagan"
+        #      degani. Ustoz keyin "kech keldi" bossa, hech qachon
+        #      berilmagan "kelmadi" coini qaytarib olinardi va balans
+        #      yo'qdan o'zgarardi (aynan shu -coin shikoyati).
+        #   2. Sozlama o'zgargan bo'lsa (masalan kelmadi 10 dan 15 ga)
+        #      eski status yangi qiymat bilan bekor qilinib, farqi
+        #      balansda qolib ketardi.
+        #
+        # Jurnalning o'zi yagona ishonchli manba: qancha berilgan bo'lsa,
+        # shuncha qaytariladi.
+        applied = (
+            CoinTransaction.objects.filter(attendance=attendance).aggregate(
+                s=Sum("amount")
+            )["s"]
+            or 0
+        )
+        target = attendance_coins.get(new_status, 0)
+
+        # Status ham, coin ham o'zgarmasa — tegmaymiz. Status bir xil-u
+        # coin hali berilmagan bo'lsa (yuqoridagi 1-holat) beriladi.
+        if new_status == old_status and applied == target:
             return JsonResponse(
                 {
                     "message": "Status o'zgarmadi",
+                    "status": attendance.status,
                     "coin_balance": attendance.student.coin_balance,
                 }
             )
 
-        attendance_coins = get_attendance_coins_map()
-
         with transaction.atomic():
             student = attendance.student
 
-            if old_status in attendance_coins:
+            if applied:
                 apply_coin_transaction(
                     student,
-                    -attendance_coins[old_status],
+                    -applied,
                     ATTENDANCE_REASON.get(old_status, "manual"),
                     note=f"Status '{old_status}' bekor qilindi",
                     attendance=attendance,
                 )
 
-            if new_status in attendance_coins:
+            if target:
                 apply_coin_transaction(
                     student,
-                    attendance_coins[new_status],
+                    target,
                     ATTENDANCE_REASON.get(new_status, "manual"),
                     note=f"Status: {new_status}",
                     attendance=attendance,

@@ -18,6 +18,7 @@ from django.test.client import RequestFactory
 
 from . import views
 from .models import (
+    AttendanceCoinSettings,
     CashEntry,
     CashSession,
     Course,
@@ -786,3 +787,106 @@ class TeacherLoginChainTests(ApiCase):
         self.assertFalse(data["is_admin"])
         self.assertFalse(data["is_excellence"])
         self.assertFalse(Teacher.objects.filter(phone="+998902222222").exists())
+
+
+# ─────────────────────────────────────────
+# DAVOMAT COINLARI
+#
+# Dars ochilganda har o'quvchiga 'absent' yozuvi tayyorlab qo'yiladi —
+# bu "hali belgilanmagan" degani, coin berilmaydi. Ustoz keyin qaysi
+# tugmani bossa ham balans faqat haqiqatda berilgan coin bo'yicha
+# tuzatilishi kerak.
+# ─────────────────────────────────────────
+
+
+class AttendanceCoinTests(ApiCase):
+    def setUp(self):
+        super().setUp()
+        AttendanceCoinSettings.objects.create(
+            pk=1, present=10, late=5, absent=-15, payment_ontime=50, payment_grace_days=30
+        )
+        self.teacher = Teacher.objects.create(name="Jasur", phone="+998901234567")
+        self.group = Group.objects.create(
+            name="PY-1", lesson_time=time(10, 0), teacher=self.teacher, schedule="odd"
+        )
+        self.student = Student.objects.create(
+            name="Ali", surname="V", phone="+998900000051"
+        )
+        self.group.students.add(self.student)
+
+    def _open_board(self, day="2026-08-10"):
+        """Davomat sahifasini ochish — 'absent' yozuvlari shu payt yaratiladi."""
+        resp = views.attendance_group_day(
+            self.get("/api/attendance/group-day/", group_id=self.group.id, date=day)
+        )
+        return self.body(resp)["students"][0]["attendance_id"]
+
+    def _mark(self, attendance_id, status):
+        return views.update_attendance(
+            self.patch_("/x", {"status": status}), attendance_id=attendance_id
+        )
+
+    def _balance(self):
+        self.student.refresh_from_db(fields=["coin_balance"])
+        return self.student.coin_balance
+
+    def test_opening_the_board_gives_no_coins(self):
+        self._open_board()
+        self.assertEqual(self._balance(), 0)
+
+    def test_absent_then_late_does_not_invent_coins(self):
+        """Aynan shikoyat qilingan holat: adashib 'kelmadi', keyin 'kech keldi'."""
+        aid = self._open_board()
+        self._mark(aid, "absent")   # -15
+        self.assertEqual(self._balance(), -15)
+        self._mark(aid, "late")     # +15 qaytadi, +5 beriladi
+        self.assertEqual(self._balance(), 5)
+
+    def test_late_straight_from_a_fresh_row(self):
+        """Hech narsa bosilmagan 'absent' yozuvidan to'g'ridan-to'g'ri 'kech keldi'."""
+        aid = self._open_board()
+        self._mark(aid, "late")
+        # Berilmagan jarima qaytarilmasligi kerak — faqat +5
+        self.assertEqual(self._balance(), 5)
+
+    def test_pressing_absent_on_a_fresh_row_applies_the_penalty(self):
+        aid = self._open_board()
+        self._mark(aid, "absent")
+        self.assertEqual(self._balance(), -15)
+
+    def test_pressing_the_same_button_twice_changes_nothing(self):
+        aid = self._open_board()
+        self._mark(aid, "present")
+        self.assertEqual(self._balance(), 10)
+        self._mark(aid, "present")
+        self.assertEqual(self._balance(), 10)
+
+    def test_switching_between_statuses_stays_exact(self):
+        aid = self._open_board()
+        for status, expected in [
+            ("present", 10),
+            ("late", 5),
+            ("absent", -15),
+            ("present", 10),
+        ]:
+            self._mark(aid, status)
+            self.assertEqual(self._balance(), expected, status)
+
+    def test_settings_change_does_not_leave_a_residue(self):
+        """Sozlama o'zgargach eski status o'zining berilgan qiymati bilan qaytadi."""
+        aid = self._open_board()
+        self._mark(aid, "present")          # +10
+        self.assertEqual(self._balance(), 10)
+
+        s = AttendanceCoinSettings.get_settings()
+        s.present = 40
+        s.save()
+
+        self._mark(aid, "late")             # -10 (berilgani), +5
+        self.assertEqual(self._balance(), 5)
+
+    def test_marking_returns_the_fresh_balance(self):
+        aid = self._open_board()
+        data = self.body(self._mark(aid, "present"))
+        self.assertEqual(data["coin_balance"], 10)
+        self.assertEqual(data["status"], "present")

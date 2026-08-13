@@ -1172,6 +1172,9 @@ def create_teacher(request):
         if not name:
             return JsonResponse({"error": "Ism kiritilishi shart"}, status=400)
 
+        # Boshlang'ich parol — rol kodining o'zi. Ustoz shu bilan kiradi va
+        # profilida o'zinikiga almashtiradi; almashtirmaguncha panelda
+        # eslatma turadi.
         teacher = Teacher.objects.create(
             name=name,
             phone=phone,
@@ -1187,7 +1190,15 @@ def create_teacher(request):
             target_name=name,
         )
         return JsonResponse(
-            {"id": teacher.id, "name": teacher.name, "phone": teacher.phone}, status=201
+            {
+                "id": teacher.id,
+                "name": teacher.name,
+                "phone": teacher.phone,
+                # Panel shu qiymatni ko'rsatadi — matnni qotirib qo'ymasin,
+                # aks holda kod almashsa ekranda eski parol qolib ketadi
+                "initial_password": ADMIN_PASSWORD,
+            },
+            status=201,
         )
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
@@ -3038,6 +3049,12 @@ def login_student(request):
                     "stage": student.stage,
                     "schedule": student.schedule,
                     "coin_balance": student.coin_balance,
+                    # Hali rol kodi bilan kiryapti — panelda "parolingizni
+                    # almashtiring" eslatmasi shu bayroqqa qarab chiqadi.
+                    # Ilgari frontend kodni o'zi solishtirardi; server
+                    # aytgani ishonchliroq (kod o'zgarsa ham to'g'ri qoladi).
+                    "used_default_password": password
+                    in (ADMIN_PASSWORD, EXCELLENCE_PASSWORD),
                 }
             )
 
@@ -3059,11 +3076,19 @@ def login_student(request):
                     "exists": True,
                     "id": teacher.id,
                     "name": teacher.name,
+                    "surname": "",
                     "phone": teacher.phone,
                     "teacher_id": teacher.id,
-                    "is_admin": False,
+                    # Bu loyihada ustoz "admin" darajasida hisoblanadi —
+                    # ustoz paneli (/admin) shu bayroq bilan ochiladi.
+                    # Ilgari False qaytardi va "Ustozlar" sahifasidan
+                    # qo'shilgan ustoz o'quvchilar sahifasiga tushib
+                    # qolardi (register formasi orqali qo'shilganida esa
+                    # Student.is_admin bo'lgani uchun to'g'ri ishlardi).
+                    "is_admin": True,
                     "is_excellence": teacher.is_senior,
                     "role": "teacher",
+                    "used_default_password": password == ADMIN_PASSWORD,
                 }
             )
 

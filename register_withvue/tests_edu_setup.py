@@ -640,3 +640,149 @@ class StudentImportTests(ApiCase):
             content_type="application/json",
         )
         self.assertEqual(views.import_students(stranger).status_code, 403)
+
+
+# ─────────────────────────────────────────
+# USTOZ QO'SHISH → KIRISH → PAROLNI ALMASHTIRISH
+#
+# Uch bo'g'in bir zanjir: "Ustozlar" sahifasidan qo'shilgan ustoz rol
+# kodi bilan kiradi, ustoz paneliga tushadi va profilida parolini
+# almashtiradi. Ilgari zanjir birinchi bo'g'inda uzilardi — rol kodi
+# muhit o'zgaruvchisidan kelardi va u sozlanmagani uchun ustozga parol
+# sifatida bo'sh satr yozilib qolardi.
+# ─────────────────────────────────────────
+
+
+class TeacherLoginChainTests(ApiCase):
+    def _login(self, phone, password):
+        return views.login_student(
+            self.rf.post(
+                "/api/login/",
+                data=json.dumps({"phone": phone, "password": password}),
+                content_type="application/json",
+            )
+        )
+
+    def _create_teacher(self, name="Jasur", phone="+998901234567"):
+        return views.create_teacher(
+            self.post("/api/teachers/create/", {"name": name, "phone": phone})
+        )
+
+    def test_role_codes_have_working_defaults(self):
+        """Frontend `ROLE_PASSWORDS` shu qiymatlarni biladi — mos turishi shart."""
+        self.assertEqual(views.ADMIN_PASSWORD, "excel2024")
+        self.assertEqual(views.EXCELLENCE_PASSWORD, "excellence2024")
+        self.assertNotEqual(views.ADMIN_PASSWORD, views.EXCELLENCE_PASSWORD)
+
+    def test_added_teacher_can_log_in_with_the_code(self):
+        resp = self._create_teacher()
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(self.body(resp)["initial_password"], "excel2024")
+
+        login = self._login("+998901234567", "excel2024")
+        self.assertEqual(login.status_code, 200)
+        data = self.body(login)
+        self.assertTrue(data["exists"])
+        self.assertEqual(data["role"], "teacher")
+
+    def test_teacher_lands_on_the_teacher_panel(self):
+        """`is_admin` bayrog'i ustoz panelini (/admin) ochadi."""
+        self._create_teacher()
+        data = self.body(self._login("+998901234567", "excel2024"))
+        self.assertTrue(data["is_admin"])
+        self.assertFalse(data["is_excellence"])
+
+    def test_senior_teacher_keeps_its_flag(self):
+        views.create_teacher(
+            self.post(
+                "/api/teachers/create/",
+                {"name": "Katta", "phone": "+998901234599", "is_senior": True},
+            )
+        )
+        data = self.body(self._login("+998901234599", "excel2024"))
+        self.assertTrue(data["is_excellence"])
+
+    def test_wrong_password_is_rejected(self):
+        self._create_teacher()
+        self.assertEqual(self._login("+998901234567", "boshqa").status_code, 401)
+
+    def test_default_password_warning_is_flagged(self):
+        self._create_teacher()
+        data = self.body(self._login("+998901234567", "excel2024"))
+        self.assertTrue(data["used_default_password"])
+
+    def test_warning_goes_away_after_changing_password(self):
+        self._create_teacher()
+        resp = views.change_password(
+            self.post(
+                "/api/change-password/",
+                {
+                    "phone": "+998901234567",
+                    "old_password": "excel2024",
+                    "new_password": "menikiParol1",
+                },
+            )
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        # Eski kod endi ishlamaydi, yangisi ishlaydi va eslatma so'nadi
+        self.assertEqual(self._login("+998901234567", "excel2024").status_code, 401)
+        data = self.body(self._login("+998901234567", "menikiParol1"))
+        self.assertTrue(data["exists"])
+        self.assertFalse(data["used_default_password"])
+        self.assertTrue(data["is_admin"])
+
+    def test_role_code_cannot_be_chosen_as_a_new_password(self):
+        self._create_teacher()
+        resp = views.change_password(
+            self.post(
+                "/api/change-password/",
+                {
+                    "phone": "+998901234567",
+                    "old_password": "excel2024",
+                    "new_password": "excellence2024",
+                },
+            )
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_register_form_creates_a_teacher_profile_with_the_code(self):
+        """Ro'yxatdan o'tish formasida kod yozilsa — ustoz profili ochiladi."""
+        resp = views.register_student(
+            self.post(
+                "/api/register/",
+                {
+                    "name": "Yangi",
+                    "surname": "Ustoz",
+                    "phone": "+998901111111",
+                    "password": "excel2024",
+                    "admin_password": "excel2024",
+                    "excellence_password": "excel2024",
+                },
+            )
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = self.body(resp)
+        self.assertTrue(data["is_admin"])
+        # excel2024 menejer kodi emas — menejer profili ochilmasligi kerak
+        self.assertFalse(data["is_excellence"])
+        self.assertTrue(Teacher.objects.filter(phone="+998901111111").exists())
+
+    def test_ordinary_student_password_does_not_grant_a_role(self):
+        resp = views.register_student(
+            self.post(
+                "/api/register/",
+                {
+                    "name": "Oddiy",
+                    "surname": "O'quvchi",
+                    "phone": "+998902222222",
+                    "password": "parol123",
+                    "admin_password": "parol123",
+                    "excellence_password": "parol123",
+                },
+            )
+        )
+        data = self.body(resp)
+        self.assertFalse(data["is_admin"])
+        self.assertFalse(data["is_excellence"])
+        self.assertFalse(Teacher.objects.filter(phone="+998902222222").exists())

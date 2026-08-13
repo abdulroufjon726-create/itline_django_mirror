@@ -199,8 +199,23 @@ if not TG_WEBHOOK_SECRET:
     ).hexdigest()
 
 # ─────────────────────────────
-# ADMIN / MENEJER PANEL PAROLLARI
-# Kodda saqlanmaydi — lokalda .env, deployda Render env orqali beriladi
+# ROL KODLARI
+#
+# Ro'yxatdan o'tishda kiritilgan parol shu kodlardan biriga teng bo'lsa
+# oddiy o'quvchi emas, ustoz yoki menejer profili ochiladi. `ADMIN_PASSWORD`
+# ayni paytda "Ustozlar" sahifasidan qo'shilgan ustozning boshlang'ich
+# paroli hamdir — ustoz shu kod bilan kiradi va profilida o'zinikiga
+# almashtiradi.
+#
+# Standart qiymatlar kodda turadi, chunki frontend ham xuddi shularni
+# biladi (`ROLE_PASSWORDS`) va ekranda ochiq ko'rsatadi ("Boshlang'ich
+# parol: excel2024") — bu sir emas, ish kodi. Ilgari bu yerda bo'sh satr
+# turgani uchun ikki tomon kelishmay qolgan edi: panel orqali qo'shilgan
+# ustozga parol sifatida bo'sh satr yozilib, u tizimga kira olmasdi.
+#
+# Haqiqiy sir kerak bo'lsa Render'da ADMIN_PASSWORD/EXCELLENCE_PASSWORD
+# muhit o'zgaruvchisi orqali almashtiriladi (frontend `ROLE_PASSWORDS`
+# ham birga yangilanishi shart).
 # ─────────────────────────────
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
-EXCELLENCE_PASSWORD = os.environ.get("EXCELLENCE_PASSWORD", "")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "excel2024")
+EXCELLENCE_PASSWORD = os.environ.get("EXCELLENCE_PASSWORD", "excellence2024")

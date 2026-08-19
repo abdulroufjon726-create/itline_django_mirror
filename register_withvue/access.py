@@ -1,13 +1,14 @@
 """Menejer vakolatlari, supermenejer tekshiruvi va qurilma hisobi.
 
-Loyihada sessiya/token autentifikatsiyasi yo'q — chaqiruvchi
-'X-User-Phone' sarlavhasi orqali aniqlanadi (views.py'dagi
-`_require_staff` bilan bir xil yondashuv). Qurilma esa brauzerda bir
-marta yaratilib localStorage'da saqlanadigan 'X-Device-Id' bilan.
+Chaqiruvchi 'Authorization: Bearer <token>' orqali aniqlanadi
+(register_withvue/jwt_auth.py). Token SECRET_KEY bilan imzolangan —
+soxtalashtirib bo'lmaydi. Qurilma esa brauzerda bir marta yaratilib
+localStorage'da saqlanadigan 'X-Device-Id' bilan (bu maxfiy emas,
+faqat "qaysi qurilma" statistikasi uchun).
 
-⚠️ Bu sarlavhalarni soxtalashtirish mumkin. Maqsad — vakolatlarni
-ajratish va supermenejerga kirishlarni ko'rsatish, kriptografik himoya
-emas. Haqiqiy himoya uchun token/sessiya alohida qo'shilishi kerak.
+Ilgari (2025-yilgacha) 'X-User-Phone' sarlavhasi ishlatilgan — uni
+har kim o'zi xohlagan qiymatga o'zgartira olardi. Endi shu sarlavha
+xavfsizlik uchun ishlatilmaydi.
 """
 
 import re
@@ -15,6 +16,7 @@ import re
 from django.http import JsonResponse
 from django.utils import timezone
 
+from .jwt_auth import get_authenticated_phone
 from .models import ActivityLog, LoginDevice, Manager
 
 MIN_PHONE_KEY_LEN = 7
@@ -30,7 +32,9 @@ def phone_key(phone):
 
 def find_manager_by_phone(phone, active_only=True):
     """Menejerni telefon bo'yicha topadi — format farqiga qaramasdan."""
-    qs = Manager.objects.filter(is_active=True) if active_only else Manager.objects.all()
+    qs = (
+        Manager.objects.filter(is_active=True) if active_only else Manager.objects.all()
+    )
     exact = qs.filter(phone=phone).first()
     if exact:
         return exact
@@ -128,9 +132,7 @@ def permission_catalog():
     sections = {}
     for key, label, section in PERMISSIONS:
         sections.setdefault(section, []).append({"key": key, "label": label})
-    return [
-        {"section": name, "items": items} for name, items in sections.items()
-    ]
+    return [{"section": name, "items": items} for name, items in sections.items()]
 
 
 def clean_permissions(value):
@@ -151,7 +153,13 @@ def clean_permissions(value):
 
 
 def caller_phone(request):
-    return (request.headers.get("X-User-Phone") or "").strip()
+    """Chaqiruvchini tekshirilgan JWT token orqali aniqlaydi.
+
+    ⚠️ Bu funksiyaga ishonish mumkin — qaytgan telefon raqami
+    SECRET_KEY bilan imzolangan tokendan olingan, uni soxtalashtirib
+    bo'lmaydi (avvalgi 'X-User-Phone' sarlavhasidan farqli o'laroq).
+    """
+    return get_authenticated_phone(request)
 
 
 def caller_manager(request):
@@ -167,9 +175,7 @@ def require_super(request):
     manager = caller_manager(request)
     if manager and manager.is_super:
         return None
-    return JsonResponse(
-        {"error": "Bu bo'lim faqat supermenejer uchun"}, status=403
-    )
+    return JsonResponse({"error": "Bu bo'lim faqat supermenejer uchun"}, status=403)
 
 
 def require_permission(request, key):
@@ -184,9 +190,7 @@ def require_permission(request, key):
         return None
     if manager.has_perm(key):
         return None
-    return JsonResponse(
-        {"error": "Bu amal uchun vakolatingiz yo'q"}, status=403
-    )
+    return JsonResponse({"error": "Bu amal uchun vakolatingiz yo'q"}, status=403)
 
 
 # ─────────────────────────────────────────

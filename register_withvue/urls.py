@@ -1,6 +1,7 @@
 from django.urls import path
 from . import views
 from . import super_views
+from .jwt_auth import refresh_view
 from .views import (
     get_news,
     get_active_news,
@@ -11,6 +12,12 @@ from .views import (
 )
 
 urlpatterns = [
+    # ───────────────────────────────
+    # AUTENTIFIKATSIYA (JWT)
+    # ───────────────────────────────
+    # Access token muddati tugaganda (12 soat) frontend shu yerga
+    # refresh token yuboradi, qayta login qilish shart bo'lmaydi
+    path("token/refresh/", refresh_view),
     # ───────────────────────────────
     # MANAGER (eng yuqori daraja)
     # ───────────────────────────────
@@ -154,7 +161,9 @@ urlpatterns = [
     path("payment-requests/create/", views.create_payment_request),
     path("payment-requests/", views.get_payment_requests),
     path("payment-requests/pending-count/", views.pending_requests_count),
-    path("payment-requests/student/<int:student_id>/", views.get_student_payment_requests),
+    path(
+        "payment-requests/student/<int:student_id>/", views.get_student_payment_requests
+    ),
     path("payment-requests/<int:req_id>/accept/", views.accept_payment_request),
     path("payment-requests/<int:req_id>/reject/", views.reject_payment_request),
     # ───────────────────────────────
@@ -237,7 +246,6 @@ urlpatterns = [
     path("news/<int:news_id>/", get_news_detail, name="news-detail"),
     path("news/<int:news_id>/update/", update_news, name="news-update"),
     path("news/<int:news_id>/delete/", delete_news, name="news-delete"),
-    
     # ───────────────────────────────
     # LEADS / REKLAMA (import qilingan baza)
     # ───────────────────────────────

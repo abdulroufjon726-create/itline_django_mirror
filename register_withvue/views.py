@@ -46,11 +46,14 @@ from .models import (
 from django.utils import timezone
 from django.conf import settings
 from rest_framework import generics, permissions
+from .jwt_auth import issue_tokens
 from .phones import forget_student_phones
+from .ratelimit import check_rate_limit, reset_rate_limit
 from .serializers import CourseLevelSerializer, NewsSerializer, RoomSerializer
 from .access import (
     DEFAULT_PERMISSIONS,
     caller_manager,
+    caller_phone,
     is_device_blocked,
     log_action,
     log_attendance,
@@ -769,6 +772,14 @@ def manager_login(request):
                 {"error": "Telefon va parol kiritilishi shart"}, status=400
             )
 
+        # Brute-force himoyasi: shu IP+telefon 5 daqiqada 5 martadan
+        # ortiq noto'g'ri parol kiritsa, vaqtincha bloklanadi
+        limited = check_rate_limit(
+            request, key_prefix="manager_login", extra_key=phone
+        )
+        if limited:
+            return limited
+
         if not manager:
             return JsonResponse({"error": "Menejer topilmadi"}, status=404)
 
@@ -780,6 +791,9 @@ def manager_login(request):
                 {"error": "Bu qurilma bloklangan — supermenejerga murojaat qiling"},
                 status=403,
             )
+
+        # Muvaffaqiyatli login — hisoblagichni tozalaymiz
+        reset_rate_limit(request, key_prefix="manager_login", extra_key=phone)
 
         record_login(
             request,
@@ -801,6 +815,11 @@ def manager_login(request):
                 # Supermenejerda cheklov yo'q — frontend buni is_super
                 # orqali biladi, ro'yxat faqat oddiy menejer uchun
                 "permissions": manager.permissions or [],
+                # Bundan keyingi har bir so'rovda shu access token
+                # 'Authorization: Bearer <token>' sifatida yuboriladi
+                "tokens": issue_tokens(
+                    manager.phone, "super" if manager.is_super else "manager"
+                ),
             }
         )
     except json.JSONDecodeError:
@@ -1511,17 +1530,12 @@ def sheet_import_status(request):
 def _require_staff(request):
     """Chaqiruvchi menejer yoki ustozmi — shuni tekshiradi.
 
-    ⚠️ Bu TO'LIQ AUTENTIFIKATSIYA EMAS. Loyihada sessiya/token tizimi
-    yo'q, shuning uchun bu yerda faqat 'X-User-Phone' sarlavhasi
-    tekshiriladi — uni qo'lda soxtalashtirish mumkin. Maqsadi: ustoz
-    o'chirish va o'quvchi ko'chirish kabi qaytarib bo'lmaydigan
-    amallar tasodifan yoki URL'ni bilgan begona odam tomonidan
-    ishga tushib ketmasin. Haqiqiy himoya uchun token/sessiya
-    autentifikatsiyasi alohida qo'shilishi kerak.
+    Telefon raqami JWT tokendan olinadi (access.caller_phone) — token
+    SECRET_KEY bilan imzolangan, soxtalashtirib bo'lmaydi.
 
     Mos kelsa None, aks holda tayyor 403 javobini qaytaradi.
     """
-    phone = (request.headers.get("X-User-Phone") or "").strip()
+    phone = caller_phone(request)
     if phone and (
         _find_manager_by_any_phone(phone) or _find_teacher_by_any_phone(phone)
     ):
@@ -1543,10 +1557,10 @@ def _caller_own_teacher(request):
 
     Ustoz boshqa ustozning guruhlarini ko'rmasligi uchun ishlatiladi.
     Menejer va panel darajasidagi (is_excellence) foydalanuvchilar uchun
-    None qaytaradi — ular hamma guruhni ko'raveradi. Sarlavha
-    bo'lmasa ham None: eski mijozlar ishlashda davom etadi.
+    None qaytaradi — ular hamma guruhni ko'raveradi. Token bo'lmasa
+    ham None: eski mijozlar ishlashda davom etadi.
     """
-    phone = (request.headers.get("X-User-Phone") or "").strip()
+    phone = caller_phone(request)
     if not phone:
         return None
     if _find_manager_by_any_phone(phone):
@@ -2740,11 +2754,10 @@ def _require_manager_or_admin(request):
     menejer yoki is_admin/is_excellence o'quvchi. O'quvchini butunlay
     o'chirish kabi qaytarib bo'lmaydigan amallar uchun.
 
-    ⚠️ Bu TO'LIQ AUTENTIFIKATSIYA EMAS — 'X-User-Phone' sarlavhasini
-    soxtalashtirish mumkin. Maqsadi: begona yoki oddiy ustoz tasodifan
-    o'chirib yubormasin. Mos kelsa None, aks holda 403 javob.
+    Telefon raqami JWT tokendan olinadi — soxtalashtirib bo'lmaydi.
+    Mos kelsa None, aks holda 403 javob.
     """
-    phone = (request.headers.get("X-User-Phone") or "").strip()
+    phone = caller_phone(request)
     if phone and (
         _find_manager_by_any_phone(phone) or _find_admin_student_by_phone(phone)
     ):
@@ -3009,6 +3022,14 @@ def login_student(request):
         if password is None:
             return JsonResponse({"exists": bool(candidates)})
 
+        # Brute-force himoyasi: shu IP+telefon 5 daqiqada 5 martadan
+        # ortiq noto'g'ri parol kiritsa, vaqtincha bloklanadi
+        limited = check_rate_limit(
+            request, key_prefix="student_login", extra_key=phone
+        )
+        if limited:
+            return limited
+
         # Bir xil raqamli bir nechta o'quvchi bo'lishi mumkin (aka-uka) —
         # parolga mos kelganini tanlaymiz
         student, password_ok = None, False
@@ -3028,6 +3049,7 @@ def login_student(request):
                     {"error": "Bu qurilma bloklangan — menejerga murojaat qiling"},
                     status=403,
                 )
+            reset_rate_limit(request, key_prefix="student_login", extra_key=phone)
             record_login(
                 request,
                 phone=student.phone,
@@ -3055,6 +3077,10 @@ def login_student(request):
                     # aytgani ishonchliroq (kod o'zgarsa ham to'g'ri qoladi).
                     "used_default_password": password
                     in (ADMIN_PASSWORD, EXCELLENCE_PASSWORD),
+                    "tokens": issue_tokens(
+                        student.phone,
+                        "teacher" if (student.is_admin or student.is_excellence) else "student",
+                    ),
                 }
             )
 
@@ -3065,6 +3091,7 @@ def login_student(request):
                     {"error": "Bu qurilma bloklangan — menejerga murojaat qiling"},
                     status=403,
                 )
+            reset_rate_limit(request, key_prefix="student_login", extra_key=phone)
             record_login(
                 request,
                 phone=teacher.phone,
@@ -3089,6 +3116,7 @@ def login_student(request):
                     "is_excellence": teacher.is_senior,
                     "role": "teacher",
                     "used_default_password": password == ADMIN_PASSWORD,
+                    "tokens": issue_tokens(teacher.phone, "teacher"),
                 }
             )
 
@@ -8492,21 +8520,31 @@ def change_password(request):
 
 @csrf_exempt
 def update_profile(request):
-    """Profil ma'lumotlarini yangilaydi. Body: {phone, name, surname}
+    """Profil ma'lumotlarini yangilaydi. Body: {name, surname}
 
     Ustoz/adminda ikkita yozuv bor (Teacher + Student.is_admin) — ikkalasida
     ham ism birga yangilanadi.
+
+    ⚠️ Ilgari 'phone' body'dan olinardi — bu degani, kimdir boshqa
+    birovning telefon raqamini yuborib, uning ismini o'zgartirishi
+    mumkin edi. Endi telefon JWT tokendan (tekshirilgan, soxtalashtirib
+    bo'lmaydigan) olinadi — faqat o'zining profilini yangilay oladi.
     """
     if request.method not in ("POST", "PATCH"):
         return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    phone = caller_phone(request)
+    if not phone:
+        return JsonResponse(
+            {"error": "Profilni yangilash uchun tizimga kirgan bo'lishingiz kerak"},
+            status=401,
+        )
+
     try:
         data = json.loads(request.body)
-        phone = (data.get("phone") or "").strip()
         name = (data.get("name") or "").strip()
         surname = (data.get("surname") or "").strip()
 
-        if not phone:
-            return JsonResponse({"error": "phone majburiy"}, status=400)
         if not name:
             return JsonResponse({"error": "Ism bo'sh bo'lishi mumkin emas"}, status=400)
 

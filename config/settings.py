@@ -10,10 +10,20 @@ load_dotenv(BASE_DIR / ".env")
 
 
 # SECURITY
-SECRET_KEY = os.environ.get("SECRET_KEY", "django-insecure-change-this-key")
-
 # Read DEBUG from environment for deploy flexibility
 DEBUG = os.environ.get("DEBUG", "False").lower() in ("1", "true", "yes")
+
+SECRET_KEY = os.environ.get("SECRET_KEY", "")
+if not SECRET_KEY:
+    if DEBUG:
+        # Faqat local development uchun — production'da bu ishlamaydi
+        SECRET_KEY = "django-insecure-local-dev-only-change-in-render-env"
+    else:
+        raise RuntimeError(
+            "SECRET_KEY environment o'zgaruvchisi o'rnatilmagan! "
+            "Render dashboard > Environment bo'limida SECRET_KEY qo'shing. "
+            "Ishlab chiqarishda standart kalit bilan ishga tushirish taqiqlanadi."
+        )
 
 # Allow hosts configurable via env var; keep render domain by default
 ALLOWED_HOSTS = os.environ.get(
@@ -31,6 +41,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "rest_framework_simplejwt",
     "corsheaders",
     "register_withvue",
 ]
@@ -107,6 +118,21 @@ else:
 # When behind a proxy (Render), honor X-Forwarded-Proto for secure URLs
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
+# ─────────────────────────────
+# PRODUCTION XAVFSIZLIK HEADER'LARI
+# DEBUG=False bo'lganda (Render'da) ishga tushadi. Local development
+# (DEBUG=True, HTTP orqali) buzilmasligi uchun shart qo'yilgan.
+# ─────────────────────────────
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True  # HTTP so'rovlarni avtomatik HTTPS'ga yo'naltiradi
+    SESSION_COOKIE_SECURE = True  # cookie faqat HTTPS orqali yuboriladi
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31536000  # brauzerga 1 yil "faqat HTTPS" deb aytadi
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True  # brauzer fayl turini "taxmin qilishi"ni to'xtatadi
+    X_FRAME_OPTIONS = "DENY"  # saytni boshqa saytga iframe orqali joylashtirishni bloklaydi
+
 # PASSWORD VALIDATION
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -144,14 +170,58 @@ STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
+# ─────────────────────────────
+# JWT AUTENTIFIKATSIYA
+#
+# Loyihada Django'ning standart User modeli ishlatilmaydi (Manager,
+# Teacher, Student o'z jadvallarida), shuning uchun SimpleJWT'ning
+# "for_user()" emas, qo'lda claim qo'shiladigan usuli ishlatiladi —
+# tokenga faqat 'phone' va 'role' yoziladi (register_withvue/jwt_auth.py).
+#
+# Token SECRET_KEY bilan imzolanadi — uni bilmagan hech kim o'zi uchun
+# soxta token yasay olmaydi. Shu bilan avvalgi 'X-User-Phone'
+# muammosi (istalgan qiymatni yuborish mumkin edi) butunlay yopiladi.
+# ─────────────────────────────
+from datetime import timedelta  # noqa: E402
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(hours=12),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=30),
+    "ROTATE_REFRESH_TOKENS": True,
+    "ALGORITHM": "HS256",
+    "SIGNING_KEY": SECRET_KEY,
+}
+
+
+# CACHE
+# Login urinishlarini sanash (rate limiting) uchun ishlatiladi
+# (register_withvue/ratelimit.py). Render'dagi bitta worker uchun
+# yetarli — ko'p worker/instance ishlatilsa Redis'ga o'tkazish kerak
+# bo'ladi, chunki bu xotira har bir worker'da alohida bo'ladi.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+    }
+}
+
+
 # CORS
+# ⚠️ MUHIM: Ilgari CORS_ALLOW_ALL_ORIGINS=True edi — bu istalgan saytdan
+# (jumladan zararli saytdan) API'ga so'rov yuborishga ruxsat berardi.
+# Endi faqat quyidagi domenlardan so'rov qabul qilinadi. Yangi frontend
+# domen (masalan Vercel) qo'shsangiz, Render'da CORS_EXTRA_ORIGINS env
+# o'zgaruvchisiga vergul bilan ajratib qo'shing:
+#   CORS_EXTRA_ORIGINS=https://itline.vercel.app,https://itline.uz
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:8080",
+] + [
+    origin.strip()
+    for origin in os.environ.get("CORS_EXTRA_ORIGINS", "").split(",")
+    if origin.strip()
 ]
 
-# test uchun
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_CREDENTIALS = True
 
 # Menejer paneli destruktiv amallarda 'X-User-Phone' sarlavhasini,
 # har bir so'rovda esa 'X-Device-Id' ni yuboradi (supermenejer qaysi
@@ -219,3 +289,16 @@ if not TG_WEBHOOK_SECRET:
 # ─────────────────────────────
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "excel2024")
 EXCELLENCE_PASSWORD = os.environ.get("EXCELLENCE_PASSWORD", "excellence2024")
+
+if not DEBUG and (
+    os.environ.get("ADMIN_PASSWORD") is None
+    or os.environ.get("EXCELLENCE_PASSWORD") is None
+):
+    import logging
+
+    logging.warning(
+        "⚠️ OGOHLANTIRISH: ADMIN_PASSWORD yoki EXCELLENCE_PASSWORD Render "
+        "environment'da o'rnatilmagan — standart (kodda ochiq turgan) "
+        "parol ishlatilmoqda. Render dashboard > Environment bo'limida "
+        "shu ikkalasini o'zgartiring."
+    )

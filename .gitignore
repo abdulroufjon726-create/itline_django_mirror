@@ -29,3 +29,6 @@ ENV/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Lokal smoke-test uchun vaqtinchalik baza
+smoke_test_db.sqlite3

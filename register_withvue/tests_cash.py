@@ -14,6 +14,11 @@ from django.test import TestCase
 from django.test.client import RequestFactory
 
 from . import views
+
+
+def _bearer(phone):
+    """View'larni JWT bilan chaqirish uchun sarlavha (middleware'siz)."""
+    return {"HTTP_AUTHORIZATION": f"Bearer {views.issue_tokens(phone, 'manager')['access']}"}
 from .models import (
     Manager,
     Student,
@@ -52,7 +57,7 @@ class CashRegisterTests(TestCase):
             "/x",
             data=body,
             content_type="application/json",
-            HTTP_X_USER_PHONE=self.mgr.phone,
+            **_bearer(self.mgr.phone),
         )
 
     def test_cross_day_history_preserved(self):
@@ -223,7 +228,7 @@ class CollectionPlanTests(TestCase):
         req = self.rf.get(
             "/api/cash/current/",
             {"month": "2026-08"},
-            HTTP_X_USER_PHONE=self.mgr.phone,
+            **_bearer(self.mgr.phone),
         )
         with _on(date(2026, 8, 10)):
             body = json.loads(views.get_cash_current(req).content)
@@ -247,7 +252,9 @@ class PaymentInstallmentTests(TestCase):
             surname="Test",
             phone="+998900000011",
             password="x",
-            permissions=["cash.view", "cash.close"],
+            # payments.edit — sinov to'lov summasini tuzatish (kamaytirish
+            # tasdiq oqimi) ham shu sinfda; cash.* — kassa yuritish.
+            permissions=["cash.view", "cash.close", "payments.edit"],
         )
         self.student = Student.objects.create(
             name="Ali", surname="Vali", phone="+998900000012", stage=1
@@ -262,7 +269,7 @@ class PaymentInstallmentTests(TestCase):
             f"/api/payments/{self.payment.id}/pay/",
             data=json.dumps({"amount": amount}),
             content_type="application/json",
-            HTTP_X_USER_PHONE=self.mgr.phone,
+            **_bearer(self.mgr.phone),
         )
         # Chek telegramga ketmasin — testda tashqi so'rov bo'lmaydi
         with patch("register_withvue.telegram.send_receipt"):
@@ -338,7 +345,7 @@ class PaymentInstallmentTests(TestCase):
                 f"/api/payments/{self.payment.id}/update/",
                 data=json.dumps(body),
                 content_type="application/json",
-                HTTP_X_USER_PHONE=self.mgr.phone,
+                **_bearer(self.mgr.phone),
             )
 
         with _on(date(2026, 8, 2)):

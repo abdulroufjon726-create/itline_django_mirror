@@ -18,6 +18,7 @@ yuboradi:
 """
 
 from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
@@ -84,12 +85,19 @@ def get_authenticated_role(request):
     return str(token.get("role", "") or "")
 
 
+@csrf_exempt
 def refresh_view(request):
     """POST /api/token/refresh/ — refresh token bilan yangi access token oladi.
 
     Frontend access token muddati tugaganda (12 soat) shu endpoint'ga
     murojaat qiladi, foydalanuvchi qayta login qilishga majbur
     bo'lmaydi.
+
+    ⚠️ csrf_exempt bo'lishi shart: boshqa barcha API endpoint'lar kabi
+    bu ham cookie-sessiya emas, JWT sarlavhasi bilan ishlaydi — CSRF
+    himoyasi brauzer cookie'lariga asoslangan hujumlar uchun kerak,
+    bu yerda esa token qo'lda yuboriladi (ilmgari decorator tushib
+    qolgan edi: token yangilash har safar 403 berardi).
     """
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)

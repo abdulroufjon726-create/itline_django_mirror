@@ -13,7 +13,7 @@ from django.test import TestCase
 from django.test.client import RequestFactory
 
 from . import views
-from .models import Student, Payment, StagePrice, Course, Group
+from .models import Manager, Student, Payment, StagePrice, Course, Group
 
 # Joriy oyni qotiramiz — "keyingi oy" solishtiruvi barqaror bo'lsin
 TODAY = date(2026, 8, 15)  # joriy oy = 2026-08
@@ -26,13 +26,22 @@ def _fixed_today():
 class PriceReactivityTests(TestCase):
     def setUp(self):
         self.rf = RequestFactory()
+        self.manager = Manager.objects.create(
+            name="Menejer", phone="+998901112233", password="x", is_super=True
+        )
         self.student = Student.objects.create(
             name="Ali", surname="Vali", phone="+998900000010", stage=1
         )
         StagePrice.objects.create(stage=1, price=400000)
 
     def _patch(self, path, body):
-        return self.rf.patch(path, data=json.dumps(body), content_type="application/json")
+        tokens = views.issue_tokens(self.manager.phone, "super")
+        return self.rf.patch(
+            path,
+            data=json.dumps(body),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {tokens['access']}",
+        )
 
     def test_only_future_months_change(self):
         past = Payment.objects.create(

@@ -128,11 +128,26 @@ class ReceiptOnRequestAcceptTests(TestCase):
         )
 
     def _accept(self, amount=300000):
-        return Client().patch(
+        # Qabul endi JWT + vakolat talab qiladi — vakolatli menejer
+        # sifatida chaqiramiz (middleware'siz to'g'ridan-to'g'ri view).
+        from django.test.client import RequestFactory
+
+        from . import views as vw
+        from .models import Manager
+
+        mgr, _ = Manager.objects.get_or_create(
+            phone="+998900000099",
+            defaults={"name": "Menejer", "password": "x",
+                      "permissions": ["payments.requests"]},
+        )
+        token = vw.issue_tokens(mgr.phone, "manager")["access"]
+        req = RequestFactory().patch(
             f"/api/payment-requests/{self.pr.id}/accept/",
             data=json.dumps({"amount": amount, "month": "2026-08"}),
             content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
         )
+        return vw.accept_payment_request(req, self.pr.id)
 
     @patch("register_withvue.telegram.send_receipt")
     def test_accepting_a_request_sends_the_receipt(self, send_receipt):

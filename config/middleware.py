@@ -1,5 +1,8 @@
 import logging
+
 from django.http import JsonResponse
+
+logger = logging.getLogger(__name__)
 
 
 class JsonExceptionMiddleware:
@@ -19,3 +22,81 @@ class JsonExceptionMiddleware:
         except Exception:
             logging.exception("Unhandled exception during request")
             return JsonResponse({"error": "Internal server error"}, status=500)
+
+
+# ─────────────────────────────────────────────────────────────────
+# API AUTH GATE — "sukut bo'yicha rad etish" (deny by default)
+# ─────────────────────────────────────────────────────────────────
+#
+# Muammo: panel API'sining ko'p qismi (o'quvchilar, ustozlar, leadlar,
+# to'lovlar, xabarlar tarixi) umuman autentifikatsiyasiz edi. Bir
+# marta JWT qo'shilgan view'lar bor, boshqalari esa ochiq qolgan —
+# yangi endpoint qo'shilsa, muallif tekshiruv yozishini unutishi
+# mumkin edi. Endi mantiq teskari: HAR BIR /api/ so'rovi JWT token
+# bilan ochiladi, faqat quyidagi ommaviy ro'yxatdan tashqari.
+#
+# Ommaviy (token talab qilmaydigan) endpoint'lar:
+#   * login/register/parol o'zgartirish — foydalanuvchi hali tokenga
+#     ega emas,
+#   * Telegram webhook va Face ID terminali — ular o'z maxfiy
+#     kalitlari bilan himoyalangan (tg_webhook, faceid_event),
+#   * ping — uptime monitoring uchun.
+#
+# Bir marta kirmagan (token yo'q) so'rovga 401 qaytadi — frontend
+# uni avtomatik login sahifasiga yo'naltiradi.
+# ─────────────────────────────────────────────────────────────────
+
+# Ikkala path usuli ham qo'shiladi — trailing slash bor/yo'qligiga
+# qaramasdan ishlashi uchun.
+PUBLIC_API_PATHS = (
+    "/api/ping/",
+    "/api/login/",  # o'quvchi/ustoz login (login_student)
+    "/api/register/",  # o'quvchi ro'yxatdan o'tishi
+    "/api/manager/login/",  # menejer login
+    "/api/token/refresh/",  # access token yangilash
+    "/api/change-password/",  # parol almashtirish (bot orqali kod bilan)
+    "/api/verify/send-code/",  # tasdiqlash kodi yuborish
+    "/api/verify/check-code/",  # kodni tekshirish
+    "/api/tg/webhook/",  # Telegram bot (X-Telegram-Bot-Api-Secret-Token)
+    "/api/payment-requests/create/",  # o'quvchi chek yuboradi (bot chat_id bilan)
+)
+
+PUBLIC_API_PREFIXES = (
+    "/api/faceid/event/",  # terminal (URL ichidagi secret bilan)
+    "/api/faceid/sync/",  # terminal agenti (URL ichidagi secret bilan)
+)
+
+
+class ApiAuthGateMiddleware:
+    """Har bir /api/ so'rovini JWT token bilan tekshiradi.
+
+    Token bo'lmasa/imzosi yaroqsiz bo'lsa 401 qaytaradi. Ommaviy
+    endpoint'lar (PUBLIC_API_PATHS / PUBLIC_API_PREFIXES) undan
+    tashqarida — ularning ba'zilari view ichida o'z tekshiruviga ega
+    (masalan webhook secret'i), qolganlari tabiatan ommaviy (login).
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        path = request.path
+        if path.startswith("/api/"):
+            allowed = (
+                path in PUBLIC_API_PATHS
+                or any(path.startswith(p) for p in PUBLIC_API_PREFIXES)
+            )
+            if not allowed:
+                from register_withvue.access import caller_phone
+
+                if not caller_phone(request):
+                    logger.warning(
+                        "API auth gate: token yuborilmagan (IP=%s, path=%s)",
+                        request.META.get("REMOTE_ADDR"),
+                        path,
+                    )
+                    return JsonResponse(
+                        {"error": "Avtorizatsiya talab qilinadi (JWT token kerak)"},
+                        status=401,
+                    )
+        return self.get_response(request)

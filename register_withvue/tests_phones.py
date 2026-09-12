@@ -4,8 +4,20 @@ import json
 
 from django.test import Client, TestCase
 
-from .models import Student, TelegramSubscriber
+from .models import Manager, Student, TelegramSubscriber
 from .phones import forget_phone
+
+
+def _staff_headers():
+    """API gate JWT talab qiladi — menejer sifatida sarlavha beramiz."""
+    from . import views as vw
+
+    mgr, _ = Manager.objects.get_or_create(
+        phone="+998900000099",
+        defaults={"name": "Menejer", "password": "x", "permissions": ["students.delete"]},
+    )
+    token = vw.issue_tokens(mgr.phone, "manager")["access"]
+    return {"HTTP_AUTHORIZATION": f"Bearer {token}"}
 
 
 class DeleteStudentClearsPhoneTests(TestCase):
@@ -20,7 +32,9 @@ class DeleteStudentClearsPhoneTests(TestCase):
         )
 
     def _delete(self, student):
-        return Client().delete(f"/api/students/delete/{student.id}/")
+        return Client().delete(
+            f"/api/students/delete/{student.id}/", **_staff_headers()
+        )
 
     def test_deleting_a_student_forgets_the_number(self):
         res = self._delete(self.student)
@@ -84,7 +98,9 @@ class HiddenHolderTests(TestCase):
     """Ro'yxatda ko'rinmaydigan yozuv raqamni band qilib turganini aytadi."""
 
     def _search(self, term):
-        res = Client().get(f"/api/students/overview/?search={term}")
+        res = Client().get(
+            f"/api/students/overview/?search={term}", **_staff_headers()
+        )
         return json.loads(res.content)
 
     def test_a_teacher_profile_is_reported(self):

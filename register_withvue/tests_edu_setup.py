@@ -45,7 +45,12 @@ def _created_at(day, hour=12):
 
 
 class ApiCase(TestCase):
-    """Menejer sifatida chaqirish uchun umumiy asos."""
+    """Menejer sifatida chaqirish uchun umumiy asos.
+
+    View'lar chaqiruvchini JWT tokendan aniqlaydi — RequestFactory
+    middleware'ni chetlab o'tgani uchun sarlavha shu yerda qo'shiladi
+    (production'da so'rov API gate orqali keladi).
+    """
 
     def setUp(self):
         self.rf = RequestFactory()
@@ -54,7 +59,13 @@ class ApiCase(TestCase):
         )
 
     def _headers(self):
-        return {"HTTP_X_USER_PHONE": self.manager.phone}
+        return {"HTTP_AUTHORIZATION": f"Bearer {self._token()}"}
+
+    def _token(self):
+        if not hasattr(self, "_cached_token"):
+            tokens = views.issue_tokens(self.manager.phone, "super")
+            self._cached_token = tokens["access"]
+        return self._cached_token
 
     def get(self, path, **params):
         return self.rf.get(path, data=params, **self._headers())

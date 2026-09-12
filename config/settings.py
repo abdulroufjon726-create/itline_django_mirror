@@ -54,6 +54,10 @@ MIDDLEWARE = [
     "config.middleware.JsonExceptionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    # API gate — /api/ ostidagi HAR BIR endpoint JWT talab qiladi
+    # (ommaviy ro'yxatdagi: login, register, webhook'lar). Deny-by-default:
+    # yangi qo'shilgan endpoint tasodifan ochiq qolmaydi.
+    "config.middleware.ApiAuthGateMiddleware",
     # WhiteNoise static uchun
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -119,6 +123,16 @@ else:
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 # ─────────────────────────────
+# XAVFSIZLIK HEADER'LARI — HAR DOIM (DEBUG=True'da ham)
+# Bular xavfsizlik mudofaasi, faqat "chiroylik" uchun emas: brauzer
+# darajasida XSS va boshqa hujumlar ortini qoplaydi.DEBUG'ga bog'liq
+# emas — lokal HTTP'da ham ishlaydi, shuning uchun shartsiz o'rnatiladi.
+# ─────────────────────────────
+SECURE_CONTENT_TYPE_NOSNIFF = True  # brauzer fayl turini "taxmin qilishi"ni to'xtatadi
+X_FRAME_OPTIONS = "DENY"  # saytni boshqa saytga iframe orqali joylashtirishni bloklaydi
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"  # tashqi saytga to'liq URL oqmaydi
+
+# ─────────────────────────────
 # PRODUCTION XAVFSIZLIK HEADER'LARI
 # DEBUG=False bo'lganda (Render'da) ishga tushadi. Local development
 # (DEBUG=True, HTTP orqali) buzilmasligi uchun shart qo'yilgan.
@@ -130,8 +144,6 @@ if not DEBUG:
     SECURE_HSTS_SECONDS = 31536000  # brauzerga 1 yil "faqat HTTPS" deb aytadi
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
-    SECURE_CONTENT_TYPE_NOSNIFF = True  # brauzer fayl turini "taxmin qilishi"ni to'xtatadi
-    X_FRAME_OPTIONS = "DENY"  # saytni boshqa saytga iframe orqali joylashtirishni bloklaydi
 
 # PASSWORD VALIDATION
 AUTH_PASSWORD_VALIDATORS = [
@@ -223,15 +235,19 @@ CORS_ALLOWED_ORIGINS = [
 
 CORS_ALLOW_CREDENTIALS = True
 
-# Menejer paneli destruktiv amallarda 'X-User-Phone' sarlavhasini,
-# har bir so'rovda esa 'X-Device-Id' ni yuboradi (supermenejer qaysi
+# Panel har bir so'rovda JWT tokenni 'Authorization' sarlavhasida,
+# qurilma ID'sini esa 'X-Device-Id' da yuboradi (supermenejer qaysi
 # qurilmadan kirilganini shu orqali ko'radi). Standart bo'lmagan
 # sarlavha CORS preflight'ni ishga tushiradi — ro'yxatga qo'shilmasa
 # brauzer so'rovni bloklaydi va sahifada "Internet aloqasi yo'q"
 # ko'rinadi. Yangi sarlavha qo'shsangiz, shu ro'yxatga ham qo'shing.
+#
+# Eslatma: eski 'X-User-Phone' sarlavhasi endi ishlatilmaydi (u
+# istalgan qiymatga o'zgartirilishi mumkin edi) — ro'yxatdan olib
+# tashlandi, token o'rniga JWT 'Authorization' ishlatiladi.
 from corsheaders.defaults import default_headers  # noqa: E402
 
-CORS_ALLOW_HEADERS = (*default_headers, "x-user-phone", "x-device-id")
+CORS_ALLOW_HEADERS = (*default_headers, "x-device-id")
 
 # ─────────────────────────────
 # TELEGRAM BOT (o'quvchilarga xabar yuborish)

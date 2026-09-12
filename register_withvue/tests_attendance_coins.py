@@ -28,9 +28,16 @@ class AttendanceCoinPayloadTests(TestCase):
         )
         self.group.students.add(self.student)
 
+    def _headers(self):
+        """View'lar JWT'dan chaqiruvchini aniqlaydi — token shu yerda."""
+        if not hasattr(self, "_cached_token"):
+            tokens = views.issue_tokens("+998900000021", "teacher")
+            self._cached_token = tokens["access"]
+        return {"HTTP_AUTHORIZATION": f"Bearer {self._cached_token}"}
+
     def _day(self):
         req = self.rf.get(
-            "/api/attendance/group-day/", {"group_id": self.group.id}
+            "/api/attendance/group-day/", {"group_id": self.group.id}, **self._headers()
         )
         resp = views.attendance_group_day(req)
         self.assertEqual(resp.status_code, 200)
@@ -66,6 +73,7 @@ class AttendanceCoinPayloadTests(TestCase):
                 }
             ),
             content_type="application/json",
+            **self._headers(),
         )
         self.assertEqual(views.give_manual_coins(give).status_code, 201)
 
@@ -83,6 +91,7 @@ class AttendanceCoinPayloadTests(TestCase):
                 }
             ),
             content_type="application/json",
+            **self._headers(),
         )
         self.assertEqual(views.give_manual_coins(again).status_code, 400)
         self.assertEqual(
@@ -95,6 +104,7 @@ class AttendanceCoinPayloadTests(TestCase):
         req = self.rf.get(
             "/api/attendance/group-month/",
             {"group_id": self.group.id, "month": "2026-08"},
+            **self._headers(),
         )
         resp = views.attendance_group_month(req)
         self.assertEqual(resp.status_code, 200)

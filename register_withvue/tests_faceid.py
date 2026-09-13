@@ -9,6 +9,7 @@ sifatida o'qilishi.
 import base64
 import io
 import json
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.test import Client, TestCase
@@ -491,11 +492,27 @@ class EndToEndTests(TestCase):
         self.assertEqual(self.student.face_status, "synced")
 
         # ④ Terminal yuzni tanib hodisa yuboradi
+        # Aniq ish kuni (dushanba) ishlatamiz — "daily" guruh yakshanba
+        # kun dam oladi, real hozirgi vaqtga tayanadigan bo'lsa test
+        # haftaning bir kunida yiqilardi.
+        from datetime import datetime
+
+        from django.utils import timezone as tz
+
+        now_local = tz.localtime()
+        event_day = now_local + timedelta(days=(0 - now_local.weekday()) % 7)
+        event_dt = datetime(
+            event_day.year,
+            event_day.month,
+            event_day.day,
+            9, 5, 0,
+            tzinfo=tz.get_current_timezone(),
+        )
         res = self.client.post(
             "/api/faceid/event/e2e/",
             data=json.dumps(
                 {
-                    "dateTime": timezone.localtime().isoformat(),
+                    "dateTime": event_dt.isoformat(),
                     "AccessControllerEvent": {
                         "majorEventType": 5,
                         "subEventType": 75,

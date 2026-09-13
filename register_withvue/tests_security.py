@@ -918,3 +918,109 @@ class ChangePasswordBruteForceTests(_AuthCase):
         self.student.password = make_password("EskiParol123")
         self.student.save(update_fields=["password"])
         self.assertEqual(self._post("xatoParol").status_code, 401)
+
+
+class CrossRoleDenyTests(_AuthCase):
+    """Rol chegaralari: o'quvchi/ustoz tokeni boshqalar ma'lumotini ololmaydi.
+
+    Token o'g'irlangan (yoki soxta front yaratilgan) taqdirda ham
+    o'quvchi faqat o'z ma'lumotiga ega bo'ladi — barcha boshqa
+    endpointlar 403 qaytaradi.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.student = Student.objects.create(
+            name="Ali", surname="Vali", phone="+998900000020"
+        )
+        self.other = Student.objects.create(
+            name="Vali", surname="Aliyev", phone="+998900000021"
+        )
+        self.teacher = Teacher.objects.create(
+            name="Ustoz Aka", phone="+998900000022", password="x"
+        )
+        self.unperm_manager = Manager.objects.create(
+            name="Bo'sh",
+            surname="Menejer",
+            phone="+998900000023",
+            password="x",
+            permissions=[],  # hech qanday vakolat yo'q
+        )
+
+    def _student_auth(self):
+        return self._auth(self.student.phone, "student")
+
+    def test_student_token_cannot_list_all_students(self):
+        res = self.client.get("/api/students/overview/", **self._student_auth())
+        self.assertEqual(res.status_code, 403)
+
+    def test_student_token_cannot_read_others_balance(self):
+        res = self.client.get(
+            f"/api/coins/balance/{self.other.id}/", **self._student_auth()
+        )
+        self.assertEqual(res.status_code, 403)
+
+    def test_student_token_cannot_give_coins(self):
+        res = self.client.post(
+            "/api/coins/add/",
+            data=json.dumps(
+                {"student_id": self.other.id, "amount": 100, "reason": "test"}
+            ),
+            content_type="application/json",
+            **self._student_auth(),
+        )
+        self.assertEqual(res.status_code, 403)
+
+    def test_student_token_cannot_see_all_payments(self):
+        res = self.client.get("/api/payments/", **self._student_auth())
+        self.assertEqual(res.status_code, 403)
+
+    def test_student_token_cannot_see_leads(self):
+        res = self.client.get("/api/leads/", **self._student_auth())
+        self.assertEqual(res.status_code, 403)
+
+    def test_student_token_cannot_see_payment_requests(self):
+        res = self.client.get("/api/payment-requests/", **self._student_auth())
+        self.assertIn(res.status_code, (403, 404))
+
+    def test_student_token_cannot_see_attendance(self):
+        res = self.client.get("/api/monthly-absences/", **self._student_auth())
+        self.assertEqual(res.status_code, 403)
+
+    def test_student_token_cannot_delete_student(self):
+        res = self.client.delete(
+            f"/api/students/delete/{self.other.id}/", **self._student_auth()
+        )
+        self.assertEqual(res.status_code, 403)
+
+    def test_permissionless_manager_cannot_give_coins(self):
+        res = self.client.post(
+            "/api/coins/add/",
+            data=json.dumps(
+                {"student_id": self.other.id, "amount": 100, "reason": "test"}
+            ),
+            content_type="application/json",
+            **self._auth(self.unperm_manager.phone, "manager"),
+        )
+        self.assertEqual(res.status_code, 403)
+
+    def test_permissionless_manager_cannot_see_leads(self):
+        res = self.client.get(
+            "/api/leads/", **self._auth(self.unperm_manager.phone, "manager")
+        )
+        self.assertEqual(res.status_code, 403)
+
+    def test_super_manager_sees_everything(self):
+        super_mgr = Manager.objects.create(
+            name="Super",
+            surname="Direktor",
+            phone="+998900000024",
+            password="x",
+            is_super=True,
+        )
+        res = self.client.get("/api/leads/", **self._auth(super_mgr.phone, "manager"))
+        self.assertEqual(res.status_code, 200)
+        res2 = self.client.get(
+            "/api/students/overview/", **self._auth(super_mgr.phone, "manager")
+        )
+        self.assertEqual(res2.status_code, 200)

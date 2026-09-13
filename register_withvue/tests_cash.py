@@ -313,7 +313,10 @@ class PaymentInstallmentTests(TestCase):
         with _on(date(2026, 8, 2)):
             self._pay(200000)
 
-        req = self.rf.get(f"/api/payments/{self.payment.id}/history/")
+        req = self.rf.get(
+            f"/api/payments/{self.payment.id}/history/",
+            **_bearer(self.mgr.phone),
+        )
         body = json.loads(views.get_payment_installments(req, self.payment.id).content)
         self.assertEqual(body["paid_amount"], 400000)
         self.assertEqual(body["remaining"], 0)

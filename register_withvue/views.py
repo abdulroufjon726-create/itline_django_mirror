@@ -981,6 +981,14 @@ def delete_manager(request, manager_id):
 
 def get_coin_balance(request, student_id):
     """Student coin balansini ko'rish."""
+    # O'quvchi faqat o'z balansini ko'radi (IDOR); xodimlar — hammadan
+    caller = caller_phone(request)
+    if caller:
+        target = Student.objects.filter(id=student_id).only("phone").first()
+        if caller and target and not _phones_match(caller, target.phone):
+            denied = _staff_read(request, "students.view")
+            if denied:
+                return denied
     try:
         student = Student.objects.filter(id=student_id).first()
         if not student:
@@ -998,6 +1006,10 @@ def get_coin_balance(request, student_id):
 
 def get_all_coin_balances(request):
     """Barcha studentlarning coin balansini ko'rish."""
+    # Butun ro'yxat — faqat xodimlar (reyting sahifasi alohida, ochiq)
+    denied = _staff_read(request, "students.view")
+    if denied:
+        return denied
     try:
         teacher_id = request.GET.get("teacher_id", "")
         qs = (
@@ -1032,6 +1044,10 @@ def add_coin(request):
     """Studentga coin berish yoki olish."""
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    # Coin berish moliyaviy amal — faqat menejer (coins.give) yoki ustoz
+    denied = _require_staff_perm(request, "coins.give")
+    if denied:
+        return denied
     try:
         data = json.loads(request.body)
 
@@ -1095,6 +1111,9 @@ def delete_coin_transaction(request, txn_id):
     """Coin tranzaksiyasini bekor qilish."""
     if request.method != "DELETE":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = _perm_any(request, "coins.give", "coins.settings")
+    if denied:
+        return denied
 
     try:
         txn = CoinTransaction.objects.filter(id=txn_id).first()
@@ -1117,6 +1136,9 @@ def set_coin_balance(request, student_id):
     """Faqat Manager: student coin balansini to'g'ridan-to'g'ri belgilash."""
     if request.method != "PATCH":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = _perm_any(request, "coins.give", "coins.settings")
+    if denied:
+        return denied
     try:
         data = json.loads(request.body)
         new_balance = data.get("coin_balance")
@@ -1478,6 +1500,9 @@ def update_teacher_penalty_limit(request, teacher_id):
     """O'qituvchining ja'zo chegarasini yangilash."""
     if request.method != "PATCH":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = _require_manager(request)
+    if denied:
+        return denied
     try:
         data = json.loads(request.body)
         teacher = Teacher.objects.filter(id=teacher_id).first()
@@ -1550,6 +1575,9 @@ def sheet_import_status(request):
     bo'lsa hammasi qaytariladi va tashqaridan hech narsa o'zgarmagandek
     ko'rinadi. Shu sababli xatoning o'zi ham shu yerda ko'rsatiladi.
     """
+    denied = _require_manager(request)
+    if denied:
+        return denied
     from .models import SheetImportMeta
     from .management.commands.load_sheet_data import DATA_VERSION
 
@@ -1735,6 +1763,10 @@ def get_teachers_overview(request):
     telefoni to'liq kelmagan ustozlarga shartli kod berilgan, ular
     raqami kiritilmaguncha tizimga kira olmaydi.
     """
+    # Oylik daromad — faqat xodimlar ko'radi; menejerdan vakolat so'raladi
+    denied = _staff_read(request, "teachers.view", "history.view")
+    if denied:
+        return denied
     try:
         try:
             start, end, months = _range_months(request)
@@ -1837,6 +1869,9 @@ def get_teacher_history(request, teacher_id):
       students — o'quvchilar ro'yxati, davr bo'yicha to'lagani va qarzi
       entries  — kassa jurnalidan haqiqiy pul harakati (sana bilan)
     """
+    denied = _staff_read(request, "teachers.view", "history.view")
+    if denied:
+        return denied
     try:
         teacher = Teacher.objects.filter(id=teacher_id).first()
         if not teacher:
@@ -1994,6 +2029,9 @@ def get_students_overview(request):
     Sanoq qidiruvdan oldin olinadi — qidiruv ro'yxatni toraytiradi,
     davr statistikasini emas.
     """
+    denied = _staff_read(request, "students.view", "teachers.view")
+    if denied:
+        return denied
     try:
         qs = _real_students().select_related("teacher")
         if request.GET.get("include_graduates") not in ("1", "true", "yes"):
@@ -2478,6 +2516,10 @@ def transfer_students(request):
 
 def get_stage_prices(request):
     """Etaplar bo'yicha narxlar."""
+    # Narxlar panel sahifalarida ishlatiladi — xodimlar ko'radi
+    denied = _staff_read(request, "students.view")
+    if denied:
+        return denied
     try:
         prices = list(
             StagePrice.objects.all().order_by("stage").values("id", "stage", "price")
@@ -2913,6 +2955,20 @@ def staff_request(request, *, phone, role):
     return request
 
 
+def _require_manager(request):
+    """Faqat menejer (har qanday vakolat bilan) — boshqalar 403.
+
+    Moliyaviy/boshqaruv amallari uchun: o'quvchi va ustoz tokenlari
+    bu endpoint'larga umuman kira olmaydi, hatto token o'g'irlangan
+    taqdirda ham.
+    """
+    if caller_manager(request) is None:
+        return JsonResponse(
+            {"error": "Bu amal uchun menejer sifatida kirish kerak"}, status=403
+        )
+    return None
+
+
 def _require_staff_perm(request, key):
     """Xabar yuborish kabi amallar: menejer — vakolati bilan, ustoz —
     ruxsat bilan. Boshqalar (o'quvchi, anonim) — 403.
@@ -3312,6 +3368,10 @@ def login_student(request):
 
 def get_lessons(request):
     """Darslar ro'yxati."""
+    # Darslar jadvali — faqat xodimlar ko'radi
+    denied = _staff_read(request, "groups.view", "attendance.view")
+    if denied:
+        return denied
     try:
         teacher_id = request.GET.get("teacher_id", "")
         qs = Lesson.objects.select_related("teacher").order_by("-date")
@@ -3440,6 +3500,10 @@ def create_lesson(request):
 
 def get_attendance(request, lesson_id):
     """Darsga davomat ro'yxati."""
+    # Davomatda boshqalar ismi/telefoni bor — faqat xodimlar ko'radi
+    denied = _staff_read(request, "attendance.view", "students.view")
+    if denied:
+        return denied
     try:
         try:
             lesson_id = int(lesson_id)
@@ -3801,6 +3865,9 @@ def get_student_attendance(request, student_id):
 
 def get_monthly_absences(request):
     """Oylik davomatlar statistikasi."""
+    denied = _staff_read(request, "attendance.view", "students.view")
+    if denied:
+        return denied
     try:
         month = request.GET.get("month", datetime.now().strftime("%Y-%m"))
         teacher_id = request.GET.get("teacher_id", "")
@@ -3842,6 +3909,10 @@ def get_monthly_absences(request):
 
 def get_attendance_coin_settings(request):
     """Davomat coin sozlamalarini olish."""
+    # Panelda coin sozlamalari sahifasi bor — xodimlar ko'radi
+    denied = _staff_read(request, "attendance.view")
+    if denied:
+        return denied
     try:
         s = AttendanceCoinSettings.get_settings()
         return JsonResponse(
@@ -3930,6 +4001,14 @@ def update_attendance_coin_settings(request):
 
 def get_student_penalties(request, student_id):
     """O'quvchining ja'zolari."""
+    # O'quvchi o'zini ko'radi (shaxsiy sahifasi), xodimlar — hammadan
+    caller = caller_phone(request)
+    if caller:
+        target = Student.objects.filter(id=student_id).only("phone").first()
+        if caller and target and not _phones_match(caller, target.phone):
+            denied = _staff_read(request, "students.view")
+            if denied:
+                return denied
     try:
         try:
             student_id = int(student_id)
@@ -3958,6 +4037,14 @@ def get_student_penalties(request, student_id):
 
 def get_teacher_students_penalties(request, teacher_id):
     """O'qituvchining o'z studentlarining ja'zolari."""
+    # Ustoz faqat o'z o'quvchilari, menejer — vakolati bilan
+    own = _caller_own_teacher(request)
+    if own and str(own.id) != str(teacher_id):
+        return JsonResponse({"error": "Faqat o'z o'quvchilaringiz ja'zosini ko'ra olasiz"}, status=403)
+    if not own:
+        denied = _staff_read(request, "students.view")
+        if denied:
+            return denied
     try:
         try:
             teacher_id = int(teacher_id)
@@ -3992,6 +4079,12 @@ def create_student_penalty(request):
     """O'quvchiga ja'zo berish."""
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    # Ja'zo faqat ustoz (o'z o'quvchisiga) va menejerga
+    own = _caller_own_teacher(request)
+    if not own:
+        denied = _require_manager(request)
+        if denied:
+            return denied
     try:
         data = json.loads(request.body)
         student_id = data.get("student_id")
@@ -4033,6 +4126,9 @@ def delete_student_penalty(request, penalty_id):
     """Ja'zoni o'chirish."""
     if request.method != "DELETE":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = _require_manager(request)
+    if denied:
+        return denied
     try:
         try:
             penalty_id = int(penalty_id)
@@ -4539,6 +4635,9 @@ def payment_installments(payment):
 @csrf_exempt
 def get_payment_installments(request, payment_id):
     """To'lov tarixi — qaysi kuni qancha tushgani."""
+    denied = _staff_read(request, "payments.view", "payments.edit", "history.view")
+    if denied:
+        return denied
     try:
         payment_id = int(payment_id)
     except (ValueError, TypeError):
@@ -5369,6 +5468,10 @@ def _payment_request_row(pr, include_receipt=False):
 
 def get_payment_requests(request):
     """Manager uchun to'lov so'rovlari. ?status=pending|accepted|rejected|all."""
+    # To'lov so'rovlari — moliyaviy oqim, faqat menejerlarga
+    denied = _perm_any(request, "payments.requests", "payments.view")
+    if denied:
+        return denied
     try:
         status = (request.GET.get("status") or "pending").strip()
         qs = PaymentRequest.objects.select_related("student").all()
@@ -5385,6 +5488,10 @@ def get_payment_requests(request):
 
 def pending_requests_count(request):
     """Kutayotgan to'lov so'rovlari soni (badge uchun)."""
+    # Paneldagi badge — moliyaviy ma'lumot, faqat menejerlarga
+    denied = _perm_any(request, "payments.requests", "payments.view")
+    if denied:
+        return denied
     return JsonResponse(
         {"count": PaymentRequest.objects.filter(status="pending").count()}
     )
@@ -6520,7 +6627,11 @@ def get_products(request):
 
 
 def get_all_products(request):
-    """Admin uchun: barcha mahsulotlar."""
+    """Admin uchun: barcha mahsulotlar (faol bo'lmaganlar bilan)."""
+    # Paneldagi do'kon boshqaruvi — xodimlar ko'radi
+    denied = _staff_read(request, "shop.products")
+    if denied:
+        return denied
     try:
         qs = Product.objects.all().order_by("-created_at")
         data = [
@@ -6691,6 +6802,19 @@ def create_order(request):
     """O'quvchi buyurtma qilish."""
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    # O'quvchi faqat o'z nomidan buyurtma beradi (IDOR)
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    caller = caller_phone(request)
+    if caller:
+        sid = data.get("student_id")
+        target = Student.objects.filter(id=sid).only("phone").first() if sid else None
+        if caller and target and not _phones_match(caller, target.phone):
+            denied = _staff_read(request, "shop.orders")
+            if denied:
+                return denied
     try:
         data = json.loads(request.body)
         student_id = data.get("student_id")
@@ -6795,6 +6919,10 @@ def get_student_orders(request, student_id):
 
 def get_all_orders(request):
     """Admin uchun: barcha buyurtmalar."""
+    # Barcha buyurtmalar — faqat xodimlar
+    denied = _staff_read(request, "shop.orders")
+    if denied:
+        return denied
     try:
         status = request.GET.get("status", "").strip()
         qs = Order.objects.select_related("student").order_by("-created_at")
@@ -6942,7 +7070,9 @@ def create_course(request):
     """Yangi kurs yaratish."""
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
-
+    denied = _perm_any(request, "courses.edit")
+    if denied:
+        return denied
     try:
         data = json.loads(request.body)
         name = data.get("name", "").strip()
@@ -7059,6 +7189,9 @@ def delete_course(request, course_id):
     """Kursni o'chirish."""
     if request.method != "DELETE":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    denied = _perm_any(request, "courses.edit")
+    if denied:
+        return denied
 
     try:
         try:
@@ -8209,6 +8342,11 @@ def get_finance_summary(request):
 
 def get_leads(request):
     """Barcha leadlar (potensial mijozlar). Ixtiyoriy ?sheet= filtri."""
+    # Leadlar — telefon/ism shaxsiy bazasi. Ustoz panelida ishlatilmaydi,
+    # shuning uchun faqat menejer (database.view vakolati bilan) ko'radi.
+    denied = _perm_any(request, "database.view")
+    if denied:
+        return denied
     try:
         qs = Lead.objects.all().order_by("id")
         sheet = request.GET.get("sheet", "").strip()
@@ -8630,6 +8768,10 @@ def tg_webhook(request):
 
 def tg_status(request):
     """Botga ulangan o'quvchilar (frontend indikator uchun)."""
+    # Paneldagi indikator — xodimlar ko'radi
+    denied = _staff_read(request, "students.view")
+    if denied:
+        return denied
     try:
         from .models import TelegramSubscriber
 

@@ -14,7 +14,11 @@ def _staff_headers():
 
     mgr, _ = Manager.objects.get_or_create(
         phone="+998900000099",
-        defaults={"name": "Menejer", "password": "x", "permissions": ["students.delete"]},
+        defaults={
+            "name": "Menejer",
+            "password": "x",
+            "permissions": ["students.delete", "students.view"],
+        },
     )
     token = vw.issue_tokens(mgr.phone, "manager")["access"]
     return {"HTTP_AUTHORIZATION": f"Bearer {token}"}

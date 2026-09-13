@@ -135,7 +135,7 @@ class Command(BaseCommand):
         payload = {
             "url": target,
             # Faqat kerakli turlar — ortiqcha update'lar bilan bandlik bo'lmasin
-            "allowed_updates": ["message", "edited_message"],
+            "allowed_updates": ["message", "edited_message", "callback_query"],
             "max_connections": 40,
         }
         if settings.TG_WEBHOOK_SECRET:

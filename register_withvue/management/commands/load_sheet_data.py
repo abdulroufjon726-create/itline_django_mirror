@@ -83,11 +83,10 @@ EXTRA_TEACHERS = [
 # Parol ustozlarnikidan farq qiladi: menejer eng yuqori
 # daraja, uning paroli views.EXCELLENCE_PASSWORD bilan bir xil
 DEFAULT_MANAGER_PASSWORD = settings.EXCELLENCE_PASSWORD
-DEFAULT_MANAGERS = [
-    # Markazning asosiy raqami — jadvalda ko'plab o'quvchilarning
-    # ota-ona ustunida uchraydi, lekin akkaunt sifatida ro'yxatda yo'q edi
-    ("Direktor", "", "917404000"),
-]
+# Direktor raqami koddan olib tashlandi (maxfiylik): akkaunt bazada
+# mavjud — bo'lmasa Render env'ida SUPER_MANAGER_PHONE orqali
+# tiklanadi yoki panelda qo'lda qo'shiladi.
+DEFAULT_MANAGERS = []
 
 # Import versiyasi — mapping o'zgarsa oshiriladi, server qayta import qiladi
 DATA_VERSION = "10"

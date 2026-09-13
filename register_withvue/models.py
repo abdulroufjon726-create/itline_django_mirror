@@ -486,7 +486,7 @@ class ReceiptSettings(models.Model):
     )
     center_name = models.CharField(
         max_length=100,
-        default="ITLINE o'quv markazi",
+        default="Excellence o'quv markazi",
         verbose_name="Markaz nomi",
     )
     updated_at = models.DateTimeField(auto_now=True)

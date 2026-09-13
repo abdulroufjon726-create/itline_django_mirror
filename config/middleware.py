@@ -59,11 +59,13 @@ PUBLIC_API_PATHS = (
     "/api/verify/check-code/",  # kodni tekshirish
     "/api/tg/webhook/",  # Telegram bot (X-Telegram-Bot-Api-Secret-Token)
     "/api/payment-requests/create/",  # o'quvchi chek yuboradi (bot chat_id bilan)
+    "/api/site-lead/",  # landing saytdan murojaat (rate-limit view ichida)
 )
 
 PUBLIC_API_PREFIXES = (
     "/api/faceid/event/",  # terminal (URL ichidagi secret bilan)
     "/api/faceid/sync/",  # terminal agenti (URL ichidagi secret bilan)
+    "/api/call/",  # imzolangan tel: redirect (Telegram qo'ng'iroq tugmasi)
 )
 
 

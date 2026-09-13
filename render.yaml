@@ -20,6 +20,10 @@ services:
       # settings.py da standart qiymatga ega — kerak bo'lsagina qo'shiladi.
       - key: TG_BOT_TOKEN
         sync: false
+      # Menejer panel manzili — lead xabaridagi "Bazaga qo'shish" tugmasi
+      # shu yerga /add-student ochadi. Panel Vercel'da: crmfr.vercel.app
+      - key: PANEL_BASE_URL
+        value: https://crmfr.vercel.app
       - key: ADMIN_PASSWORD
         sync: false
       - key: EXCELLENCE_PASSWORD

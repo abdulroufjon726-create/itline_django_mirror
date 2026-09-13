@@ -32,3 +32,7 @@ Thumbs.db
 
 # Lokal smoke-test uchun vaqtinchalik baza
 smoke_test_db.sqlite3
+smoke_lead_test.sqlite3
+
+# Lokal cloudflared tunnel logi
+tunnel_log.txt

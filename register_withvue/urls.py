@@ -4,6 +4,7 @@ from . import super_views
 from .jwt_auth import refresh_view
 from .views import (
     get_news,
+    site_lead,
     get_active_news,
     get_news_detail,
     create_news,
@@ -118,6 +119,7 @@ urlpatterns = [
     path("students/", views.get_students),
     # Jadvaldan yuklash — ?dry_run bilan avval tekshiriladi
     path("students/import/", views.import_students),
+    path("students/create/", views.create_student),
     path("students/update/<int:student_id>/", views.update_student),
     path("students/delete/<int:student_id>/", views.delete_student),
     path("students/bulk-delete/", views.bulk_delete_students),
@@ -249,6 +251,8 @@ urlpatterns = [
     # ───────────────────────────────
     # LEADS / REKLAMA (import qilingan baza)
     # ───────────────────────────────
+    # Landing sayt shakllari (ro'yxatdan o'tish / qo'llab-quvvatlash)
+    path("site-lead/", site_lead, name="site-lead"),
     path("leads/", views.get_leads),
     path("leads/<int:lead_id>/delete/", views.delete_lead),
     path("ad-channels/", views.get_ad_channels),
@@ -257,6 +261,8 @@ urlpatterns = [
     # TELEGRAM XABARLAR
     # ───────────────────────────────
     path("tg/webhook/", views.tg_webhook),
+    # Telegram inline tugmasi uchun tel: redirect (imzolangan havola)
+    path("call/<int:lead_id>/<str:signature>/", views.call_redirect),
     path("tg/status/", views.tg_status),
     path("messages/send/", views.send_message_student),
     path("messages/send-group/", views.send_message_group),

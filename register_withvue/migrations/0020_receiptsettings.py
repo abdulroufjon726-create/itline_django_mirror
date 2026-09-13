@@ -16,7 +16,7 @@ class Migration(migrations.Migration):
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
                 ('enabled', models.BooleanField(default=True, verbose_name='Chek yuborilsinmi')),
                 ('template', models.TextField(default="🧾 <b>To'lov cheki</b>\n\nHurmatli {ism}!\n{oy} oyi uchun to'lovingiz qabul qilindi.\n\nTo'langan: <b>{summa}</b>\nOylik to'lov: {jami}\nQolgan: {qolgan}\nSana: {sana}\n\nRahmat! 🙏\n{markaz}", verbose_name='Chek matni')),
-                ('center_name', models.CharField(default="ITLINE o'quv markazi", max_length=100, verbose_name='Markaz nomi')),
+                ('center_name', models.CharField(default="Excellence o'quv markazi", max_length=100, verbose_name='Markaz nomi')),
                 ('updated_at', models.DateTimeField(auto_now=True)),
             ],
             options={

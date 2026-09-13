@@ -1,4 +1,6 @@
 import calendar
+import hashlib
+import hmac as hmac_mod
 import json
 import logging
 import secrets
@@ -7,7 +9,7 @@ from datetime import datetime, date, time as dtime, timedelta, timezone as dt_ti
 from django.db import transaction
 from django.db.models import Sum, F, Count, Q, Value, IntegerField
 from django.db.models.functions import Greatest
-from django.http import JsonResponse, HttpResponseForbidden
+from django.http import HttpResponse, JsonResponse, HttpResponseForbidden
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth.hashers import make_password, check_password
 from django.db import models as db_models
@@ -758,8 +760,8 @@ def manager_login(request):
         if not phone:
             return JsonResponse({"error": "Telefon kiritilishi shart"}, status=400)
 
-        # Raqam qanday formatda kiritilsa ham topiladi ('+998 91 740 40 00',
-        # '917404000', '91-740-40-00' — hammasi bir xil menejerga tushadi)
+        # Raqam qanday formatda kiritilsa ham topiladi ('+998 90 123 45 67',
+        # '901234567', '90-123-45-67' — hammasi bir xil menejerga tushadi)
         manager = _find_manager_by_any_phone(phone)
 
         # Login formasi avval faqat raqamni tekshiradi (parolsiz) —
@@ -899,8 +901,8 @@ def update_manager(request, manager_id):
                 return JsonResponse(
                     {"error": "Telefon raqam bo'sh bo'lishi mumkin emas"}, status=400
                 )
-            # Formatdan qat'i nazar solishtiramiz — '917404000' va
-            # '+998 91 740 40 00' bir xil raqam
+            # Formatdan qat'i nazar solishtiramiz — '901234567' va
+            # '+998 90 123 45 67' bir xil raqam
             clash = next(
                 (
                     m
@@ -2018,7 +2020,7 @@ def get_students_overview(request):
         rows = list(qs.order_by("name", "surname"))
         if search:
             digits = _re.sub(r"\D", "", search)
-            # '+998 91 740 40 00' kabi qidiruvda mamlakat kodi bazadagi
+            # '+998 90 123 45 67' kabi qidiruvda mamlakat kodi bazadagi
             # yozuvda yo'q — uni olib tashlaymiz
             if len(digits) > 9 and digits.startswith("998"):
                 digits = digits[3:]
@@ -2027,7 +2029,7 @@ def get_students_overview(request):
             def hit(s):
                 if low in f"{s.name} {s.surname}".lower():
                     return True
-                # Saqlangan raqamda bo'shliq bor ('91 740 40 00'), shuning
+                # Saqlangan raqamda bo'shliq bor ('90 123 45 67'), shuning
                 # uchun ikkala tomonni ham raqamlargacha tozalab solishtiramiz
                 if len(digits) >= 3:
                     stored = _re.sub(r"\D", "", f"{s.phone} {s.phone2}")
@@ -2734,7 +2736,7 @@ def _phone_key(phone):
     """Telefonni solishtirish uchun normal ko'rinishga keltiradi.
 
     Format qanday bo'lishidan qat'i nazar bir xil natija beradi:
-    '+998 91 740 40 00', '917404000', '91-740-40-00' → '917404000'.
+    '+998 90 123 45 67', '901234567', '90-123-45-67' → '901234567'.
 
     Jadvalda to'liq kiritilmagan qisqa raqamlar (masalan 8 xonali
     '91858990') ham o'z raqamlari bilan qaytariladi — eski versiya
@@ -8237,6 +8239,261 @@ def get_leads(request):
         return JsonResponse({"count": len(leads), "sheets": sheets, "leads": leads})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
+
+
+# ───────────────────────────────────────────────
+# QO'NG'IROQ REDIRECT — Telegram inline tugmasi uchun
+#
+# Telegram inline tugma URL'larda `tel:` sxemasini qabul qilmaydi
+# ("Wrong port number" xatosi bilan rad etadi), lekin HTTP havoladan
+# keyin telefon ilovasiga o'tishni o'zi bajaradi. Shuning uchun tugma
+# shu endpoint'ga boradi va u darhol tel: manziliga yo'naltiradi.
+#
+# Havola imzolanadi (HMAC): faqat bot o'zi yaratgan qisqa muddatli
+# havolalar ishlaydi — begona odam istalgan raqamga redirect qilib
+# spam/qiynash vositasi sifatida ishlata olmaydi.
+# ───────────────────────────────────────────────
+
+_CALL_TTL_SECONDS = 3600
+
+
+def _normalize_phone_target(digits):
+    """tel: uchun raqamni xalqaro ko'rinishga keltiradi.
+
+    "998 90 123 45 67" yoki "998901234567" kabi (+'siz) yozilgan
+    raqamlarni telefon ilovasi "noto'g'ri raqam" deb rad etadi —
+    +998 bilan boshlanadigan to'liq ko'rinishga o'tkazamiz:
+      * 12 xonali, 998 bilan — +998 901234567 ko'rinishiga
+      * 9 xonali (mahalliy, kodi siz) — +998 qo'shiladi
+      * qolgani — oldiga + qo'yiladi
+    """
+    if len(digits) == 12 and digits.startswith("998"):
+        return digits[3:], True
+    if len(digits) == 9:
+        return digits, True
+    return digits, False
+
+
+def _call_sign(phone_digits, expires):
+    """tel: redirect havolasi uchun HMAC imzo."""
+    from django.conf import settings as dj_settings
+
+    msg = f"call:{phone_digits}:{expires}".encode()
+    return hmac_mod.new(
+        dj_settings.SECRET_KEY.encode(), msg, hashlib.sha256
+    ).hexdigest()[:32]
+
+
+@csrf_exempt
+def call_redirect(request, lead_id, signature):
+    """Imzolangan havolani tel: manziliga yo'naltiradi.
+
+    Imzo yaroqsiz/muddati o'tgan bo'lsa oddiy matn qaytaradi —
+    brauzerda ham, Telegram'ning ichki brauzerida ham xavfsiz.
+    """
+    from .models import Lead
+
+    lead = Lead.objects.filter(id=lead_id).only("phone").first()
+    if lead is None:
+        return HttpResponseForbidden("Havola yaroqsiz")
+
+    digits = "".join(ch for ch in str(lead.phone) if ch.isdigit())
+    if not digits:
+        return HttpResponseForbidden("Raqam topilmadi")
+
+    # Imzo raqam va muddat ustidan hisoblanadi — raqam o'zgarsa,
+    # eskirgan havola ishlamaydi
+    for expires in _candidate_expiry_windows():
+        if hmac_mod.compare_digest(_call_sign(digits, expires), signature):
+            # HttpResponseRedirect tel: ni rad etadi (faqat http/https/ftp),
+            # shuning uchun Location sarlavhasini qo'lda yozamiz.
+            # "998..." ko'rinishidagi raqamlar +998 ga keltiriladi — aks
+            # holda telefon ilovasi ularni noto'g'ri raqam deb rad etadi.
+            rest, is_uzbek = _normalize_phone_target(digits)
+            target = f"+998{rest}" if is_uzbek else digits
+            resp = HttpResponse(status=302)
+            resp["Location"] = f"tel:{target}"
+            return resp
+    return HttpResponseForbidden("Havola eskirgan — Telegramda tugmani qayta bosing")
+
+
+def _candidate_expiry_windows():
+    """Joriy va oldingi soatlik oyna — soat chegarasida ham ishlaydi."""
+    import time
+
+    now = int(time.time())
+    current = now // _CALL_TTL_SECONDS
+    return (current, current - 1)
+
+
+@csrf_exempt
+def site_lead(request):
+    """Ommaviy: landing saytdan kelgan murojaat (lead) qabul qiladi.
+
+    Saytdagi "Ro'yxatdan o'tish" va "Need Support" shakllari shu yerga
+    yoziladi. JWT talab qilinmaydi (middleware PUBLIC_API_PATHS ro'yxatida),
+    lekin IP bo'yicha rate-limit bor — spam'dan himoya.
+
+    Har bir yangi murojaat Telegram orqali botga ulangan barcha
+    menejerlarga yetkaziladi — panel ochilmay turib ham ko'rinadi.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    limited = check_rate_limit(
+        request, key_prefix="site_lead", limit=10, window_seconds=600
+    )
+    if limited:
+        return limited
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    name = str(data.get("name") or "").strip()[:200]
+    phone = str(data.get("phone") or "").strip()[:50]
+    interest = str(data.get("interest") or "").strip()[:200]
+    note = str(data.get("note") or "").strip()[:1000]
+    source = str(data.get("source") or "").strip()[:30]
+
+    # Telefon majburiy: aks holda biz bog'lana olmaymiz
+    if not phone or sum(ch.isdigit() for ch in phone) < 7:
+        return JsonResponse(
+            {"error": "Telefon raqam noto'g'ri — to'liq raqam kiriting"},
+            status=400,
+        )
+    if not name:
+        name = "Ism ko'rsatilmagan"
+
+    lead = Lead.objects.create(
+        name=name,
+        phone=phone,
+        interest=interest,
+        note=note,
+        source=source or "website",
+    )
+
+    # Menejerlarga tugmali Telegram xabar — fon oqimida, javobni kutmaymiz.
+    # Tugmalar: Bog'lanish -> Qabul/Bekor -> Bazaga qo'shish (panel formasi).
+    try:
+        from . import telegram as tg
+
+        tg.notify_managers_lead(lead)
+    except Exception:  # noqa: BLE001 — bildirishnoma murojaatni to'smasin
+        logging.getLogger(__name__).exception("Site lead TG bildirishnomasi ketmadi")
+
+    return JsonResponse(
+        {"message": "Murojaat qabul qilindi", "id": lead.id, "status": "new"},
+        status=201,
+    )
+
+
+
+@csrf_exempt
+def create_student(request):
+    """Yangi o'quvchi yaratadi (paneldagi "O'quvchi qo'shish" formasi).
+
+    Saytdan kelayotgan leadni bazaga o'tkazishda ishlatiladi: Telegram
+    xabaridagi "Bazaga qo'shish" tugmasi panelda shu formani lead
+    ma'lumotlari bilan avtomatik to'ldirilgan holatda ochadi.
+
+    Body: {name, surname?, phone, note?, status?, lead_id?}
+    lead_id berilsa lead "accepted" holatga ko'chiriladi va izohiga
+    kim tomonidan qabul qilingani yoziladi.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    denied = _perm_any_or_admin(request, "students.edit")
+    if denied:
+        return denied
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    name = str(data.get("name") or "").strip()[:100]
+    surname = str(data.get("surname") or "").strip()[:100]
+    phone = str(data.get("phone") or "").strip()[:20]
+    note = str(data.get("note") or "").strip()
+    status = data.get("status") or "pending"
+    lead_id = data.get("lead_id")
+
+    if len(name) < 2:
+        return JsonResponse({"error": "Ismni to'liq kiriting"}, status=400)
+    digits = _re.sub(r"\D", "", phone)
+    if len(digits) < 9:
+        return JsonResponse(
+            {"error": "Telefon raqamni to'liq kiriting (masalan +998 90 123 45 67)"},
+            status=400,
+        )
+    if status not in ("pending", "contact", "active"):
+        status = "pending"
+
+    # Bir xil raqam bazada bo'lsa yangi yozuv ochilmaydi — panelda
+    # dublikat o'quvchilar paydo bo'lishining oldini oladi.
+    # Solishtirish formatdan qat'i nazar (_phone_key): '91 740..' va
+    # '+99891740..' bir xil deb topiladi.
+    key9 = digits[-9:]
+    existing = None
+    for s in Student.objects.exclude(phone__isnull=True).only(
+        "id", "name", "surname", "phone"
+    ):
+        if _phone_key(s.phone) == key9:
+            existing = s
+            break
+    if existing:
+        return JsonResponse(
+            {
+                "error": "Bu raqam bilan o'quvchi allaqachon mavjud",
+                "existing_id": existing.id,
+                "existing_name": f"{existing.name} {existing.surname}".strip(),
+            },
+            status=409,
+        )
+
+    manager = caller_manager(request)
+    if manager is not None:
+        note = chr(10).join(filter(None, [note, (
+            f"Sayt leadidan qabul qilindi ({manager.name}, "
+            f"{timezone.localdate():%d.%m.%Y})"
+        )]))
+
+    student = Student.objects.create(
+        name=name,
+        surname=surname,
+        phone=phone,
+        status=status,
+        status_changed_at=timezone.now() if status != "active" else None,
+        note=note,
+        source="website",
+    )
+
+    if lead_id:
+        lead = Lead.objects.filter(id=lead_id).first()
+        if lead:
+            lead.status = "accepted"
+            lead.save(update_fields=["status"])
+
+    log_action(
+        request,
+        "student.create",
+        f"Yangi o'quvchi: {student} ({phone})",
+        target_type="student",
+        target_id=student.id,
+        target_name=str(student),
+    )
+    return JsonResponse(
+        {
+            "message": "O'quvchi qo'shildi",
+            "id": student.id,
+            "name": str(student),
+            "status": student.status,
+        },
+        status=201,
+    )
 
 
 @csrf_exempt

@@ -226,7 +226,14 @@ CACHES = {
 #   CORS_EXTRA_ORIGINS=https://itline.vercel.app,https://itline.uz
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    # Windows'da localhost ko'pincha IPv6 (::1) ga hal qilinadi — ikkalasini ham qabul qilamiz
+    "http://[::1]:5173",
+    "http://[::1]:8080",
     "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    # Menejer paneli (Vercel'da deploy qilingan)
+    "https://crmfr.vercel.app",
 ] + [
     origin.strip()
     for origin in os.environ.get("CORS_EXTRA_ORIGINS", "").split(",")
@@ -257,7 +264,7 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 
 # Bot username (@siz) — frontend'ga "botga kiring" havolasini ko'rsatish uchun.
 # Bo'sh qoldirilsa `set_webhook` buyrug'i chiqargan nomdan foydalaning.
-TG_BOT_USERNAME = os.environ.get("TG_BOT_USERNAME", "itline_test_2026bot")
+TG_BOT_USERNAME = os.environ.get("TG_BOT_USERNAME", "excellence_school_kokand_bot")
 
 # Backend'ning tashqi manzili — webhook'ni ro'yxatdan o'tkazish uchun.
 # Bu maxfiy emas (manzil baribir hammaga ko'rinadi), shuning uchun
@@ -266,6 +273,11 @@ TG_BOT_USERNAME = os.environ.get("TG_BOT_USERNAME", "itline_test_2026bot")
 PUBLIC_BASE_URL = os.environ.get(
     "PUBLIC_BASE_URL", "https://itline-django-9s85.onrender.com"
 ).rstrip("/")
+
+# Menejer panelining manzili. Telegram lead xabaridagi "Bazaga qo'shish"
+# tugmasi shu manzilga /add-student yo'lini ochadi — lead ma'lumotlari
+# forma URL orqali uzatiladi. Sozlanmasa tugma chiqmaydi.
+PANEL_BASE_URL = os.environ.get("PANEL_BASE_URL", "").rstrip("/")
 
 # Webhook maxfiy kaliti. Telegram har bir so'rovda buni
 # 'X-Telegram-Bot-Api-Secret-Token' sarlavhasida qaytaradi — shu orqali

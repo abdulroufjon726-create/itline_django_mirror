@@ -78,7 +78,7 @@ def resync_webhook():
 
 WELCOME_TEXT = (
     "Assalomu alaykum! 👋\n\n"
-    "Bu ITLINE o'quv markazining rasmiy xabarlar boti.\n"
+    "Bu o'quv markazining rasmiy xabarlar boti.\n"
     "To'lov eslatmalari va e'lonlarni olish uchun quyidagi tugma orqali "
     "telefon raqamingizni yuboring 👇"
 )
@@ -100,7 +100,7 @@ MANAGER_LINKED_TEXT = (
 )
 LEAD_LINKED_TEXT = (
     "✅ Rahmat{name}! Raqamingiz qabul qilindi.\n\n"
-    "ITLINE o'quv markazining yangiliklari va kurslar haqidagi "
+    "O'quv markazining yangiliklari va kurslar haqidagi "
     "e'lonlar shu yerga keladi."
 )
 
@@ -569,6 +569,12 @@ def student_login_info(student):
 
 def handle_update(update):
     """Webhook'dan kelgan update'ni qayta ishlaydi."""
+    # Lead tugmalari (Bog'lanish / Qabul / Bekor) — callback update'lari
+    cb = update.get("callback_query")
+    if cb:
+        handle_lead_callback(cb)
+        return
+
     msg = update.get("message") or update.get("edited_message")
     if not msg:
         return
@@ -988,3 +994,219 @@ def send_to_students_async(students, text, kind, month=""):
         target=send_to_students, args=(students, text, kind, month), daemon=True
     )
     t.start()
+
+
+# ─────────────────────────────────────────
+# SAYT LEADLARI — interaktiv murojaat oqimi
+#
+# Yangi murojaat menejerga tugmali xabar bo'lib boradi:
+#   1) [📞 Bog'lanish]  → xabar o'zgaradi: [✅ Qabul qilish][❌ Bekor qilish]
+#      + [📞 Qo'ng'iroq qilish] — bitta bosishda telefon ilovasi ochilib
+#      raqam terilgan bo'ladi (tel: redirect orqali)
+#   2) ✅ bosilsa → xabarga [➕ Bazaga qo'shish] havolasi chiqadi —
+#      panelning "O'quvchi qo'shish" formasi lead ma'lumotlari bilan
+#      avtomatik to'ldirilgan holatda ochiladi
+#   3) ❌ bosilsa → murojaat "bekor qilindi" deb yopiladi
+# ─────────────────────────────────────────
+
+
+def build_lead_text(lead):
+    """Lead xabari matni — holatga qarab yakuniy qatori o'zgaradi."""
+    lines = [
+        "🎯 <b>Saytdan yangi murojaat!</b>",
+        "",
+        f"👤 <b>{lead.name}</b>",
+        f"📱 <code>{lead.phone}</code>",
+    ]
+    if lead.interest:
+        lines.append(f"📚 Kurslar: {lead.interest}")
+    if lead.note:
+        lines.append(f"💬 {lead.note}")
+
+    suffix = {
+        "contacted": (
+            "\n\n⏳ <b>Bog'lanilyapti</b> — pastdagi «📞 Qo'ng'iroq qilish» "
+            "tugmasi raqamni terib telefon ilovasini ochadi.\n"
+            "Natijani belgilang:"
+        ),
+        "accepted": "\n\n✅ <b>Qabul qilindi</b> — bazaga qo'shish uchun tugmani bosing:",
+        "rejected": "\n\n❌ <b>Bekor qilindi</b>.",
+    }.get(lead.status or "new", "")
+    return "\n".join(lines) + suffix
+
+
+def _panel_add_button(lead):
+    """'Bazaga qo'shish' URL tugmasi — panel manzili sozlangan bo'lsa."""
+    base = (getattr(settings, "PANEL_BASE_URL", "") or "").rstrip("/")
+    if not base:
+        return None
+    from urllib.parse import urlencode
+
+    params = {
+        "name": lead.name or "",
+        "phone": lead.phone or "",
+        "note": lead.note or "",
+        "interest": lead.interest or "",
+        "lead": lead.id,
+    }
+    query = urlencode(params)
+    return {"text": "➕ Bazaga qo'shish", "url": f"{base}/add-student?{query}"}
+
+
+def lead_keyboard(lead):
+    """Lead holatiga mos inline tugmalar (None — tugmalar olib tashlanadi)."""
+    if lead.status == "contacted":
+        rows = [
+            [
+                {"text": "✅ Qabul qilish", "callback_data": f"lead:{lead.id}:accept"},
+                {"text": "❌ Bekor qilish", "callback_data": f"lead:{lead.id}:reject"},
+            ]
+        ]
+        # Bir bosishda qo'ng'iroq — telefon ilovasi raqam terilgan holatda ochadi
+        call_btn = _call_button(lead)
+        if call_btn:
+            rows.append([call_btn])
+        return {"inline_keyboard": rows}
+    if lead.status == "accepted":
+        button = _panel_add_button(lead)
+        if button:
+            return {"inline_keyboard": [[button]]}
+        return None
+    if lead.status == "rejected":
+        return None
+    return {"inline_keyboard": [[
+        {"text": "📞 Bog'lanish", "callback_data": f"lead:{lead.id}:contact"},
+    ]]}
+
+
+def _call_button(lead, text="📞 Qo'ng'iroq qilish"):
+    """Bir bosishda qo'ng'iroq ekranini ochuvchi tugma.
+
+    Telegram inline tugmada tel: sxemasi rad etilgani uchun havola
+    backend'dagi imzolangan redirect endpoint'ga boradi: u darhol
+    tel: manziliga yo'naltiradi va telefon ilovasi raqam terilgan
+    holatda ochiladi (saqlash taklifisiz).
+    """
+    from urllib.parse import urlencode
+
+    base = (getattr(settings, "PUBLIC_BASE_URL", "") or "").rstrip("/")
+    if not base:
+        return None
+    digits = re.sub(r"\D", "", str(lead.phone or ""))
+    if not digits:
+        return None
+    from .views import _call_sign
+
+    import time
+
+    expires = int(time.time()) // 3600
+    signature = _call_sign(digits, expires)
+    url = f"{base}/api/call/{lead.id}/{signature}/"
+    return {"text": text, "url": url}
+
+
+def notify_managers_lead(lead):
+    """Yangi sayt murojaatini menejerlarga tugmali xabar sifatida yuboradi."""
+
+    def run():
+        text = build_lead_text(lead)
+        subs = TelegramSubscriber.objects.filter(role="manager").exclude(
+            manager__isnull=True
+        )
+        for sub in subs:
+            try:
+                send_text(sub.chat_id, text, reply_markup=lead_keyboard(lead))
+            except Exception:  # noqa: BLE001 — biri xato bo'lsa qolgani ketaversin
+                logger.exception("Lead xabari ketmadi (chat=%s)", sub.chat_id)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _edit_lead_message(chat_id, message_id, lead):
+    """Lead xabarini yangi holat/matn bilan qayta chizadi."""
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": html_safe(build_lead_text(lead)),
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    keyboard = lead_keyboard(lead)
+    if keyboard:
+        payload["reply_markup"] = keyboard
+    try:
+        tg_call("editMessageText", payload)
+    except Exception:  # noqa: BLE001 — xabar o'chirilgan bo'lishi mumkin
+        logger.exception("Lead xabarini tahrirlash ketmadi (chat=%s)", chat_id)
+
+
+def handle_lead_callback(cb):
+    """Lead tugmalari bosilganda ishlaydi (callback_query update)."""
+    from .models import Lead
+
+    msg = cb.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    message_id = msg.get("message_id")
+    data = cb.get("data") or ""
+    cb_id = cb.get("id")
+
+    def answer(text="", alert=False):
+        if not cb_id:
+            return
+        try:
+            tg_call(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": cb_id,
+                    "text": text,
+                    "show_alert": alert,
+                },
+            )
+        except Exception:  # noqa: BLE001 — javob berilmasa ham davom etamiz
+            logger.exception("answerCallbackQuery ketmadi")
+
+    # Xavfsizlik: tugma faqat menejerga yuborilgan xabarda turadi —
+    # baribir bosuvchi rostdan menejermi tekshiramiz
+    sender_id = (cb.get("from") or {}).get("id")
+    is_manager = TelegramSubscriber.objects.filter(
+        chat_id=sender_id, role="manager", manager__isnull=False
+    ).exists()
+    if not is_manager:
+        answer("Faqat menejer uchun", True)
+        return
+
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "lead" or not parts[1].isdigit():
+        answer("Noma'lum amal", True)
+        return
+    lead = Lead.objects.filter(id=int(parts[1])).first()
+    action = parts[2]
+    if lead is None:
+        answer("Murojaat topilmadi", True)
+        return
+    if chat_id is None or message_id is None:
+        answer("Xabar topilmadi", True)
+        return
+
+    if action == "contact":
+        lead.status = "contacted"
+        lead.save(update_fields=["status"])
+        answer("Raqam terildi — qo'ng'iroq tugmasini bosing")
+        _edit_lead_message(chat_id, message_id, lead)
+    elif action == "accept":
+        lead.status = "accepted"
+        lead.save(update_fields=["status"])
+        answer("Qabul qilindi ✅")
+        _edit_lead_message(chat_id, message_id, lead)
+        if not _panel_add_button(lead):
+            send_text(
+                chat_id,
+                "⚠️ Panel manzili sozlanmagan (PANEL_BASE_URL) — o'quvchini panelda qo'lda qo'shing.",
+            )
+    elif action == "reject":
+        lead.status = "rejected"
+        lead.save(update_fields=["status"])
+        answer("Bekor qilindi")
+        _edit_lead_message(chat_id, message_id, lead)
+    else:
+        answer("Noma'lum amal", True)

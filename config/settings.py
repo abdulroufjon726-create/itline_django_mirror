@@ -234,6 +234,9 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:8080",
     # Menejer paneli (Vercel'da deploy qilingan)
     "https://crmfr.vercel.app",
+    # Landing sayt (eski va yangi Vercel loyihalari)
+    "https://excellece-school.vercel.app",
+    "https://excellences-school.vercel.app",
 ] + [
     origin.strip()
     for origin in os.environ.get("CORS_EXTRA_ORIGINS", "").split(",")

@@ -6,13 +6,15 @@ Qamrab olinadi:
   * ustoz kesimidagi to'lov statistikasi va tarixi,
   * xonalar va xona bandligi tekshiruvi,
   * kurs darajalari va daraja narxining to'lovga ta'siri,
-  * jadvaldan o'quvchi yuklash (dry-run va haqiqiy yozish).
+  * jadvaldan o'quvchi yuklash (dry-run va haqiqiy yozish),
+  * Excel yuklashda ustoz/guruhni avtomatik ochish (auto_create).
 """
 
 import json
 from datetime import date, datetime, time, timezone as dt_timezone
 from unittest.mock import patch
 
+from django.contrib.auth.hashers import check_password
 from django.test import TestCase
 from django.test.client import RequestFactory
 
@@ -652,6 +654,136 @@ class StudentImportTests(ApiCase):
             content_type="application/json",
         )
         self.assertEqual(views.import_students(stranger).status_code, 403)
+
+    # ── Excel yuklashda ustoz/guruhni o'zi ochish (auto_create) ──
+
+    def test_auto_create_makes_missing_teacher_and_group(self):
+        """Yangi markaz jadvali: ustoz va guruh bazada yo'q — o'zi ochiladi."""
+        _, data = self._import(
+            [{"name": "Ali", "teacher_name": "Sarvar", "group_name": "FR #1 D/CH/J 14:00"}],
+            auto_create=True,
+        )
+        self.assertEqual(data["summary"]["created"], 1)
+        self.assertEqual(data["summary"]["teachers_created"], 1)
+        self.assertEqual(data["summary"]["groups_created"], 1)
+
+        s = Student.objects.get()
+        self.assertEqual(s.teacher.name, "Sarvar")
+        self.assertEqual(list(s.groups.values_list("name", flat=True)), ["FR #1 D/CH/J 14:00"])
+        # Guruh nomidan dars kuni va vaqti o'qildi
+        g = s.groups.get()
+        self.assertEqual(g.schedule, "odd")
+        self.assertEqual(g.lesson_time, time(14, 0))
+        self.assertFalse(g.needs_review)
+
+    def test_auto_create_teacher_can_log_in_with_role_code(self):
+        self._import(
+            [{"name": "Ali", "teacher_name": "Sarvar", "group_name": "PY-99"}],
+            auto_create=True,
+        )
+        t = Teacher.objects.get(name="Sarvar")
+        self.assertTrue(check_password(views.ADMIN_PASSWORD, t.password))
+
+    def test_two_new_teachers_without_phone_do_not_collide(self):
+        """Teacher.phone unikal — telefonsiz ikkala yangi ustozga ham
+        vaqtinchalik kod beriladi (t0001, t0002), aks holda ikkinchisi
+        UNIQUE constraint bilan butun importni yo'qotardi."""
+        _, data = self._import(
+            [
+                {"name": "Ali", "teacher_name": "Ustoz Bir", "group_name": "G1"},
+                {"name": "Vali", "teacher_name": "Ustoz Ikki", "group_name": "G2"},
+            ],
+            auto_create=True,
+        )
+        self.assertEqual(data["summary"]["errors"], 0)
+        self.assertEqual(data["summary"]["teachers_created"], 2)
+        phones = list(
+            Teacher.objects.filter(name__in=["Ustoz Bir", "Ustoz Ikki"])
+            .values_list("phone", flat=True)
+        )
+        self.assertEqual(len(phones), 2)
+        self.assertTrue(all(phones))
+        self.assertNotEqual(phones[0], phones[1])
+
+    def test_teacher_phone_column_is_used(self):
+        self._import(
+            [{"name": "Ali", "teacher_name": "Rahim", "teacher_phone": "901239999",
+              "group_name": "G9"}],
+            auto_create=True,
+        )
+        t = Teacher.objects.get(name="Rahim")
+        self.assertEqual(t.phone, "901239999")
+
+    def test_auto_create_reuses_new_group_across_rows(self):
+        """Bir xil nomli guruh/ustoz jadvalda ko'p qator uchraydi — bir marta ochiladi."""
+        _, data = self._import(
+            [
+                {"name": "Ali", "group_name": "PY-99", "teacher_name": "Sarvar"},
+                {"name": "Vali", "group_name": "PY-99", "teacher_name": "Sarvar"},
+            ],
+            auto_create=True,
+        )
+        self.assertEqual(data["summary"]["created"], 2)
+        self.assertEqual(data["summary"]["groups_created"], 1)
+        self.assertEqual(data["summary"]["teachers_created"], 1)
+        self.assertEqual(Group.objects.count(), 2)  # setUp'dagi PY-1 + yangisi
+        self.assertEqual(Teacher.objects.count(), 2)
+
+    def test_auto_create_group_time_column_wins(self):
+        """"Guruh vaqti" ustuni bo'lsa — guruh shu vaqt bilan ochiladi."""
+        _, data = self._import(
+            [{"name": "Ali", "group_name": "PY-99", "group_time": "16:30"}],
+            auto_create=True,
+        )
+        self.assertEqual(data["summary"]["groups_created"], 1)
+        g = Group.objects.get(name="PY-99")
+        self.assertEqual(g.lesson_time, time(16, 30))
+
+    def test_group_time_column_updates_existing_group(self):
+        _, data = self._import(
+            [{"name": "Ali", "group_name": "py-1", "group_time": "18:00"}]
+        )
+        self.assertEqual(data["summary"]["created"], 1)
+        self.group.refresh_from_db()
+        self.assertEqual(self.group.lesson_time, time(18, 0))
+
+    def test_auto_create_group_without_time_needs_review(self):
+        """Nomida kun/vaqt yo'q — guruh ochiladi, lekin menejer tekshiradi."""
+        _, data = self._import(
+            [{"name": "Ali", "group_name": "Yangi guruh"}], auto_create=True
+        )
+        g = Group.objects.get(name="Yangi guruh")
+        self.assertTrue(g.needs_review)
+        self.assertIn("dars vaqti", g.review_note)
+
+    def test_parent_phone_column_goes_to_phone2(self):
+        """"Ota-ona raqami" ustuni qo'shimcha telefon (phone2) ga yoziladi."""
+        _, data = self._import(
+            [{"name": "Ali", "phone": "+998900000041", "phone2": "+9989351112233"}]
+        )
+        self.assertEqual(data["summary"]["created"], 1)
+        s = Student.objects.get()
+        self.assertEqual(s.phone2, "+9989351112233")
+
+    def test_auto_create_dry_run_writes_nothing(self):
+        """Tekshirish rejimi: yangi ustoz/guruh ham bazaga yozilmaydi."""
+        _, data = self._import(
+            [{"name": "Ali", "teacher_name": "Sarvar", "group_name": "PY-99"}],
+            dry_run=True,
+            auto_create=True,
+        )
+        self.assertEqual(data["summary"]["teachers_created"], 1)
+        self.assertEqual(data["summary"]["groups_created"], 1)
+        self.assertEqual(Teacher.objects.count(), 1)  # faqat setUp'dagisi
+        self.assertEqual(Group.objects.count(), 1)
+        self.assertEqual(Student.objects.count(), 0)
+
+    def test_unknown_group_still_errors_without_auto_create(self):
+        """auto_create yoqilmasa eski xulq: noma'lum guruh — xato."""
+        _, data = self._import(
+            [{"name": "Ali", "group_name": "yo'q-guruh"}], auto_create=False
+        )
+        self.assertEqual(data["summary"]["errors"], 1)
 
 
 # ─────────────────────────────────────────

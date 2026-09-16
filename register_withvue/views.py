@@ -3,6 +3,7 @@ import hashlib
 import hmac as hmac_mod
 import json
 import logging
+import re as _re
 import secrets
 from datetime import datetime, date, time as dtime, timedelta, timezone as dt_timezone
 
@@ -2120,6 +2121,16 @@ def get_students_overview(request):
 # ─────────────────────────────
 # O'QUVCHILARNI IMPORT QILISH (Excel / CSV)
 #
+# Qo'shimcha ustunlar (loyihani sotishda yangi markaz jadvali):
+#   "ota-ona telefoni" / "parent phone" → phone2,
+#   "guruh vaqti" / "group time"       → guruh dars vaqti.
+#
+# `auto_create` yoqilganda jadvaldagi ustoz va guruh nomi bazada bo'lmasa
+# XATO o'rniga avtomatik YARATILADI — yangi markaz o'z Excel faylini
+# bir yo'la yuklab, hammaga ro'yxatdan o'tadi. Guruh nomidan dars kuni
+# (D/CH/J, S/P/SH) va vaqti (9:00) ham o'qib olinadi; topilmasa guruh
+# `needs_review` bilan ochiladi va menejer paneldan to'g'rilaydi.
+#
 # Faylni frontend o'qiydi va qatorlarni JSON ko'rinishida yuboradi —
 # backendga qo'shimcha kutubxona (openpyxl) kerak bo'lmaydi va menejer
 # ustunlarni yuklashdan oldin ekranda ko'rib moslashtiradi.
@@ -2143,17 +2154,103 @@ def _import_row_name(row):
     return name, surname
 
 
+IMPORT_GROUP_TIME_WORDS = {
+    "09:00": "09:00", "9:00": "09:00", "9.00": "09:00", "09.00": "09:00",
+    "10:00": "10:00", "10.00": "10:00", "11:00": "11:00", "11.00": "11:00",
+    "12:00": "12:00", "12.00": "12:00", "13:00": "13:00", "13.00": "13:00",
+    "14:00": "14:00", "14.00": "14:00", "15:00": "15:00", "15.00": "15:00",
+    "16:00": "16:00", "16.00": "16:00", "17:00": "17:00", "17.00": "17:00",
+    "18:00": "18:00", "18.00": "18:00", "19:00": "19:00", "19.00": "19:00",
+    "20:00": "20:00", "20.00": "20:00",
+}
+
+
+def _import_group_time(raw):
+    """"Guruh vaqti" ustunidan dars soatini oladi — yo'q bo'lsa None."""
+    raw_time = str(raw.get("group_time") or "").strip()
+    if not raw_time:
+        return None
+    # '9:00' ko'rinishidagi oddiy format
+    hit = IMPORT_GROUP_TIME_WORDS.get(raw_time.lower())
+    if hit:
+        return dtime(*[int(p) for p in hit.split(":")])
+    # '9:00-11:00' / '9:30 — 11:00' kabi oraliqning boshlanishi
+    first = _re.search(r"\b(\d{1,2})[:.;](\d{2})\b", raw_time)
+    if first:
+        h, mi = int(first.group(1)), int(first.group(2))
+        if 6 <= h <= 21 and mi <= 59:
+            return dtime(hour=h, minute=mi)
+    # '1700' yoki '0900' — 4 xonali yopiq format (yil 20xx emasligini ham tekshiramiz)
+    tight = _re.fullmatch(r"([01]?\d|2[0-3])([0-5]\d)", raw_time.replace(":", ""))
+    if tight:
+        return dtime(hour=int(tight.group(1)), minute=int(tight.group(2)))
+    return None
+
+
+def _auto_create_group(name, row_time=None, persist=True):
+    """Jadvalda uchragan, bazada bo'lmagan guruhni ochadi.
+
+    Nomidan kurs, dars kuni va vaqtini o'qiydi: "FR #12 S/P/SH 14:00" →
+    Frontend kursi, toq kunlar, 14:00. Birortasi topilmasa guruh
+    `needs_review` bilan ochiladi — menejer panelda to'g'rilaydi.
+
+    "Guruh vaqti" ustuni (row_time) nomida vaqt bo'lmasa ishlatiladi.
+    persist=False (dry-run) da hech narsa bazaga yozilmaydi: guruh
+    saqlanmagan obyekt qaytaradi — u haqiqiy yuklash tranzaksiyasida
+    bargacha saqlanadi.
+    """
+    from .management.commands import load_sheet_data as _lsd
+
+    title = str(name).strip()
+    if not title:
+        return None
+
+    # Nomdan kursni yig'ish — "FR #12" → Frontend. Topilmasa guruh kursasiz ochiladi.
+    course = None
+    course_info = _lsd.parse_course(title)
+    if course_info and persist:
+        course, _ = Course.objects.get_or_create(
+            name=course_info[0], source="import", defaults={"monthly_fee": 0}
+        )
+
+    has_days = _lsd.parse_schedule(title) is not None
+    has_time = bool(_re.search(r"\d{1,2}[:;]\d{2}|\b\d{4}\b", title))
+    lesson_time = _lsd.parse_time(title)
+    if not has_time and row_time:
+        lesson_time = row_time
+
+    missing = []
+    if not has_days:
+        missing.append("dars kunlari")
+    if not (has_time or row_time):
+        missing.append("dars vaqti")
+
+    # Saqlanmagan obyekt — yozish faqat haqiqiy yuklash tranzaksiyasida
+    return Group(
+        name=title[:100],
+        course=course,
+        schedule=_lsd.parse_schedule(title) or "odd",
+        lesson_time=lesson_time,
+        source="import",
+        needs_review=bool(missing),
+        review_note=("Excel jadvalda ko'rsatilmagan: " + ", ".join(missing))[:200]
+        if missing
+        else "",
+    )
+
+
 @csrf_exempt
 def import_students(request):
     """Jadvaldan o'quvchilarni yuklash.
 
     Body: {
         rows: [{name, surname?, phone?, phone2?, teacher_name?|teacher_id?,
-                group_name?|group_id?, status?, stage?, note?}, ...],
+                group_name?|group_id?, group_time?, status?, stage?, note?}, ...],
         dry_run: true,             # faqat tekshirish (standart: false)
         default_status: "pending", # ustun bo'lmasa qaysi holat qo'yilsin
         default_teacher_id: <id>,
-        default_group_id: <id>
+        default_group_id: <id>,
+        auto_create: false         # ustoz/guruh bazada yo'q bo'lsa o'zi ochilsin
     }
 
     Har qator uchun natija qaytadi: created / duplicate / error.
@@ -2183,6 +2280,7 @@ def import_students(request):
             )
 
         dry_run = bool(data.get("dry_run"))
+        auto_create = bool(data.get("auto_create"))
         try:
             default_status = clean_status(data.get("default_status"), default="pending")
         except RangeError as e:
@@ -2203,6 +2301,19 @@ def import_students(request):
         results = []
         to_create = []  # (Student, group)
         seen_phones = set()
+        # auto_create uchun: jadval ichida bir xil nomlar uchun guruh/ustoz
+        # faqat bir marta yaratiladi, qolgan qatorlar shunga qo'shiladi
+        new_teachers = {}
+        new_groups = {}
+        created_teachers = []
+        created_groups = []
+        # Teacher.phone unikal — yangi ustozga telefon ustuni bo'lmasa
+        # vaqtinchalik kod beramiz ('t0001', 't0002'...), aks holda ikkinchi
+        # yangi ustozda UNIQUE constraint otib ketadi
+        used_teacher_phones = set()
+        # "Guruh vaqti" ustuni mavjud guruhni tuzatmoqchi bo'lsa — yozish
+        # faqat haqiqiy yuklashda (dry-run bazaga tegmaydi)
+        pending_time_updates = {}
 
         for index, raw in enumerate(rows):
             line = index + 1
@@ -2270,6 +2381,38 @@ def import_students(request):
             elif str(raw.get("teacher_name") or "").strip():
                 wanted = str(raw["teacher_name"]).strip().lower()
                 found = teachers_by_name.get(wanted)
+                if not found and auto_create:
+                    # Yangi markaz jadvalida ustoz bazada bo'lmasligi tabiiy —
+                    # xato o'rniga profili ochiladi (boshlang'ich parol — rol kodi).
+                    found = new_teachers.get(wanted)
+                    if found is None:
+                        # Saqlanmagan obyekt — haqiqiy yuklashda tranzaksiyaga
+                        # ko'chadi, dry-run esa bazaga umuman tegmaydi
+                        found = Teacher(
+                            name=str(raw["teacher_name"]).strip()[:100],
+                            password=make_password(ADMIN_PASSWORD),
+                            source="import",
+                        )
+                        # "ustoz telefoni" ustuni kelsa — haqiqiy raqam ishlatiladi
+                        # (band bo'lsa vaqtinchalik kodga qaytadi)
+                        t_phone = str(raw.get("teacher_phone") or "").strip()
+                        if t_phone and not Teacher.objects.filter(phone=t_phone).exists():
+                            found.phone = t_phone
+                            used_teacher_phones.add(t_phone)
+                        if not found.phone:
+                            n = 1
+                            while True:
+                                cand = f"t{n:04d}"
+                                if (
+                                    cand not in used_teacher_phones
+                                    and not Teacher.objects.filter(phone=cand).exists()
+                                ):
+                                    break
+                                n += 1
+                            found.phone = cand
+                            used_teacher_phones.add(cand)
+                        new_teachers[wanted] = found
+                        created_teachers.append(found)
                 if not found:
                     results.append(
                         {
@@ -2288,6 +2431,17 @@ def import_students(request):
             elif str(raw.get("group_name") or "").strip():
                 wanted = str(raw["group_name"]).strip().lower()
                 found = groups_by_name.get(wanted)
+                if not found and auto_create:
+                    found = new_groups.get(wanted)
+                    if found is None:
+                        found = _auto_create_group(
+                            raw["group_name"],
+                            row_time=_import_group_time(raw),
+                            persist=not dry_run,
+                        )
+                        if found is not None:
+                            new_groups[wanted] = found
+                            created_groups.append(found)
                 if not found:
                     results.append(
                         {
@@ -2299,6 +2453,17 @@ def import_students(request):
                     )
                     continue
                 group = found
+
+            # "Guruh vaqti" ustuni — mavjud guruh ham bo'lsa qator o'zi
+            # aniq vaqtni bersa shuning uchun tuzatamiz. Yangi (hali
+            # saqlanmagan) guruhda esa shunchaki obyektda qoladi.
+            if group:
+                row_time = _import_group_time(raw)
+                if row_time and group.lesson_time != row_time:
+                    if group.pk:
+                        pending_time_updates[group.id] = row_time
+                    else:
+                        group.lesson_time = row_time
 
             # Guruh tanlangan-u ustoz ko'rsatilmagan bo'lsa — guruhniki
             if group and not teacher:
@@ -2338,6 +2503,8 @@ def import_students(request):
             "duplicates": sum(1 for r in results if r["status"] == "duplicate"),
             "errors": sum(1 for r in results if r["status"] == "error"),
             "dry_run": dry_run,
+            "teachers_created": len(created_teachers),
+            "groups_created": len(created_groups),
         }
 
         if dry_run:
@@ -2346,6 +2513,17 @@ def import_students(request):
         # ── Haqiqiy yozish ──
         now = timezone.now()
         with transaction.atomic():
+            # dry_run paytida yaratilgan ustoz/guruhlar qaytarilmagan bo'lardi —
+            # tekshiruvdan keyin menejer "Yuklash" bosganda ular shu yerda,
+            # o'quvchilar bilan bir tranzaksiyada yashaydi: biror narsa
+            # buzilsa hammasi birga bekor qilinadi.
+            for t in created_teachers:
+                t.save()
+            for g in created_groups:
+                g.save()
+            # "Guruh vaqti" ustuni bilan keltirilgan tuzatishlar
+            for group_id, t in pending_time_updates.items():
+                Group.objects.filter(id=group_id).update(lesson_time=t)
             for student, _group in to_create:
                 student.status_changed_at = now
             Student.objects.bulk_create([s for s, _ in to_create])
@@ -2356,15 +2534,23 @@ def import_students(request):
             for student, group in to_create:
                 if group and student.id:
                     by_group.setdefault(group.id, []).append(student.id)
+            # Yangi ochilgan guruhlar groups_by_id lug'atida yo'q —
+            # ular to'g'ridan-to'g'ri to_create'dagi obyektlardan olamiz
+            linkable = dict(groups_by_id)
+            for _student, g in to_create:
+                if g is not None:
+                    linkable[g.id] = g
             for group_id, ids in by_group.items():
-                groups_by_id[group_id].students.add(*ids)
+                linkable[group_id].students.add(*ids)
 
         log_action(
             request,
             "student.create",
             f"Jadvaldan {summary['created']} ta o'quvchi yuklandi"
             + (f", {summary['duplicates']} ta dublikat" if summary["duplicates"] else "")
-            + (f", {summary['errors']} ta xato" if summary["errors"] else ""),
+            + (f", {summary['errors']} ta xato" if summary["errors"] else "")
+            + (f", {summary['teachers_created']} ta yangi ustoz" if summary["teachers_created"] else "")
+            + (f", {summary['groups_created']} ta yangi guruh" if summary["groups_created"] else ""),
             target_type="student",
             target_name="import",
             **summary,
@@ -2765,8 +2951,6 @@ def update_student(request, student_id):
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=400)
 
-
-import re as _re
 
 # Solishtirish uchun kalit shu uzunlikdan qisqa bo'lsa ishlatilmaydi —
 # aks holda import paytida berilgan shartli kodlar ('t0014', '—0007')

@@ -24,7 +24,7 @@ import time
 import urllib.error
 import urllib.request
 
-DEFAULT_URL = "https://itline-django-9s85.onrender.com/api/ping/"
+DEFAULT_URL = "https://davomat-django-zbn4.onrender.com/api/ping/"
 # Render free spin-down ~15 daqiqa; 45s interval bilan xavfsiz qamrab olinadi.
 DEFAULT_INTERVAL = 45.0
 TIMEOUT = 30

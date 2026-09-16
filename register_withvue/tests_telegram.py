@@ -59,6 +59,42 @@ class HandleUpdateTests(TestCase):
         body = send_text.call_args[0][1]
         self.assertNotIn("Parol", body)
 
+    @patch.object(tg, "send_text")
+    def test_manual_phone_text_is_rejected_entirely(self, send_text):
+        """QATIY QOIDA: raqamni qo'lda yozib yuborish umuman qabul qilinmaydi
+        (hatto o'z raqami bo'lsa ham) — faqat contact tugmasi ishlaydi."""
+        tg.handle_update(
+            {
+                "message": {
+                    "chat": {"id": 777, "first_name": "Ali"},
+                    "from": {"id": 777},
+                    "text": "+998901234567",
+                }
+            }
+        )
+        body = send_text.call_args[0][1]
+        self.assertIn("qabul qilinmaydi", body)
+        # ulanish ham yaratilmaydi
+        self.assertFalse(
+            TelegramSubscriber.objects.filter(chat_id=777).exists()
+        )
+
+    @patch.object(tg, "send_text")
+    def test_start_shows_same_number_warning(self, send_text):
+        """Bot uchun yuborilgan raqam saytga (web) bergan raqam bilan
+        bir xil bo'lishi kerak degan ogohlantirish ko'rinadi."""
+        tg.handle_update(
+            {
+                "message": {
+                    "chat": {"id": 555, "first_name": "Ali"},
+                    "from": {"id": 555},
+                    "text": "/start",
+                }
+            }
+        )
+        body = send_text.call_args[0][1]
+        self.assertIn("bir xil bo'lishi kerak", body)
+
 
 class SendToStudentsTests(TestCase):
     @patch.object(tg, "send_text")

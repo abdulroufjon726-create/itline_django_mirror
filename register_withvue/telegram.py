@@ -80,7 +80,23 @@ WELCOME_TEXT = (
     "Assalomu alaykum! 👋\n\n"
     "Bu o'quv markazining rasmiy xabarlar boti.\n"
     "To'lov eslatmalari va e'lonlarni olish uchun quyidagi tugma orqali "
-    "telefon raqamingizni yuboring 👇"
+    "telefon raqamingizni yuboring 👇\n\n"
+    "⚠️ MUHIM: yuborilgan raqam saytga (web) bergan raqamingiz bilan "
+    "bir xil bo'lishi kerak. Raqamni qo'lda yozib yuborish ishlamaydi — "
+    "faqat pastdagi tugma orqali yuboring."
+)
+CONTACT_KEYBOARD = {
+    "keyboard": [[{"text": "📱 Telefon raqamni yuborish", "request_contact": True}]],
+    "resize_keyboard": True,
+    "one_time_keyboard": True,
+}
+MANUAL_PHONE_REJECTED_TEXT = (
+    "❌ Raqamni qo'lda yozib yuborish qabul qilinmaydi.\n\n"
+    "Xavfsizlik uchun raqamingizni faqat «📱 Telefon raqamni yuborish» "
+    "tugmasi orqali yuboring — tugma Telegram'ning o'z raqamingizni "
+    "tasdiqlashiga imkon beradi.\n\n"
+    "⚠️ Eslatma: botga yuborilgan raqam saytga (web) bergan raqamingiz "
+    "bilan bir xil bo'lishi kerak."
 )
 LINKED_TEXT = "✅ {name}, siz xabarlarga muvaffaqiyatli ulandingiz!"
 NOT_FOUND_TEXT = (
@@ -587,17 +603,7 @@ def handle_update(update):
 
     try:
         if text.startswith("/start"):
-            send_text(
-                chat_id,
-                WELCOME_TEXT,
-                reply_markup={
-                    "keyboard": [
-                        [{"text": "📱 Telefon raqamni yuborish", "request_contact": True}]
-                    ],
-                    "resize_keyboard": True,
-                    "one_time_keyboard": True,
-                },
-            )
+            send_text(chat_id, WELCOME_TEXT, reply_markup=CONTACT_KEYBOARD)
             return
 
         # Rasm — Face ID uchun. Telefon tekshiruvidan oldin turadi:
@@ -606,8 +612,9 @@ def handle_update(update):
             return
 
         phone = None
-        # Faqat tugma orqali ulashilgan (Telegram tasdiqlagan) o'z raqami
-        # bo'lsagina parolni ko'rsatamiz — qo'lda yozilgan begona raqam
+        # QATIY QOIDA: raqam faqat "📱 Telefon raqamni yuborish" tugmasi
+        # orqali (Telegram o'z raqamini tasdiqlagan holda) qabul qilinadi.
+        # Qo'lda yozilgan raqam hech qachon o'tmaydi — boshqaning raqami
         # orqali birovning parolini olishning oldini oladi.
         verified_own = False
         if contact:
@@ -617,7 +624,13 @@ def handle_update(update):
                 sender_id is not None and contact.get("user_id") == sender_id
             )
         elif re.sub(r"\D", "", text) and len(re.sub(r"\D", "", text)) >= 9:
-            phone = text  # raqamni qo'lda yozgan bo'lsa ham qabul qilamiz
+            # Raqamga o'xshagan matn qo'lda yozilgan — qat'iyan rad etiladi
+            send_text(
+                chat_id,
+                MANUAL_PHONE_REJECTED_TEXT,
+                reply_markup=CONTACT_KEYBOARD,
+            )
+            return
 
         if phone:
             role, who = identify_by_phone(phone)

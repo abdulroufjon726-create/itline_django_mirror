@@ -958,7 +958,23 @@ class Lead(models.Model):
     # Xavfsizlik: murojaat qayerdan kelgani (spam tahlili uchun)
     ip_address = models.CharField(max_length=64, blank=True, default="")
     geo_info = models.CharField(max_length=200, blank=True, default="", verbose_name="Joylashuv")
+    geo_lat = models.FloatField(null=True, blank=True, verbose_name="Kenglik")
+    geo_lon = models.FloatField(null=True, blank=True, verbose_name="Uzunlik")
     user_agent = models.CharField(max_length=300, blank=True, default="")
+    device_info = models.CharField(
+        max_length=120,
+        blank=True,
+        default="",
+        verbose_name="Qurilma",
+        help_text="Telefon/kompyuter · OS · Brauzer",
+    )
+    device_extra = models.CharField(
+        max_length=120,
+        blank=True,
+        default="",
+        verbose_name="Qurilma qo'shimcha",
+        help_text="Ekran · vaqt zonasi · til (frontend yuboradi)",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

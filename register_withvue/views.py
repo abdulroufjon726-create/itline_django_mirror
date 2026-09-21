@@ -8749,17 +8749,22 @@ def site_lead(request):
     # ── "Men robot emasman" tekshiruvi — botlar forma yubora olmasin ──
     from .captcha import verify_captcha
 
-    ok, captcha_error = verify_captcha(
+    ok, captcha_error, captcha_code = verify_captcha(
         data.get("captcha_id"), data.get("captcha_answer")
     )
     if not ok:
-        return JsonResponse({"error": captcha_error, "captcha_failed": True}, status=400)
+        return JsonResponse(
+            {"error": captcha_error, "captcha_failed": True, "captcha_code": captcha_code},
+            status=400,
+        )
 
     name = str(data.get("name") or "").strip()[:200]
     phone = str(data.get("phone") or "").strip()[:50]
     interest = str(data.get("interest") or "").strip()[:200]
     note = str(data.get("note") or "").strip()[:1000]
     source = str(data.get("source") or "").strip()[:30]
+    # Frontend yuboradigan qurilma qo'shimchasi: ekran, vaqt zonasi, til
+    device_extra = str(data.get("device_extra") or "").strip()[:100]
 
     # Telefon majburiy: aks holda biz bog'lana olmaymiz
     if not phone or sum(ch.isdigit() for ch in phone) < 7:
@@ -8771,10 +8776,12 @@ def site_lead(request):
         name = "Ism ko'rsatilmagan"
 
     # Qayerdan kelgani: IP, joylashuv, qurilma — spam tahlili + menejer ko'radi
+    from .device import format_device
     from .geo import client_meta, format_geo
 
     meta = client_meta(request)
 
+    _geo = meta.get("geo") or {}
     lead = Lead.objects.create(
         name=name,
         phone=phone,
@@ -8783,7 +8790,11 @@ def site_lead(request):
         source=source or "website",
         ip_address=meta["ip"],
         geo_info=format_geo(meta["geo"]),
+        geo_lat=_geo.get("lat"),
+        geo_lon=_geo.get("lon"),
         user_agent=meta["user_agent"],
+        device_info=format_device(meta["device"]),
+        device_extra=device_extra,
     )
 
     # Menejerlarga tugmali Telegram xabar — fon oqimida, javobni kutmaymiz.

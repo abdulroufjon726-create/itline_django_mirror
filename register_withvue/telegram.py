@@ -1030,6 +1030,36 @@ def send_to_students_async(students, text, kind, month=""):
 # ─────────────────────────────────────────
 
 
+def _lead_maps_urls(lead):
+    """Lead uchun xarita havolalari.
+
+    Koordinata bor bo'lsa aniq nuqta (Google/Yandex pt-marker),
+    bo'lmasa shahar nomi bo'yicha qidiruv havolasi.
+    Hech qanday joylashuv ma'lumoti bo'lmasa None.
+    """
+    lat = getattr(lead, "geo_lat", None)
+    lon = getattr(lead, "geo_lon", None)
+    if lat is not None and lon is not None:
+        return {
+            "google": f"https://www.google.com/maps?q={lat},{lon}",
+            "yandex": f"https://yandex.com/maps/?ll={lon}%2C{lat}&z=15&pt={lon},{lat}",
+        }
+    geo_text = getattr(lead, "geo_info", "") or ""
+    if not geo_text:
+        return None
+    from urllib.parse import quote
+
+    # "Tashkent, Tashkent, Uzbekistan (Uzbektelekom)" → "Tashkent, Tashkent, Uzbekistan"
+    place = geo_text.split("(")[0].strip()
+    if not place or place == "Joylashuv aniqlanmadi" or place == "Lokal tarmoq":
+        return None
+    q = quote(place)
+    return {
+        "google": f"https://www.google.com/maps/search/?api=1&query={q}",
+        "yandex": f"https://yandex.com/maps/?text={q}",
+    }
+
+
 def build_lead_text(lead):
     """Lead xabari matni — holatga qarab yakuniy qatori o'zgaradi."""
     lines = [
@@ -1038,11 +1068,18 @@ def build_lead_text(lead):
         f"👤 <b>{lead.name}</b>",
         f"📱 <code>{lead.phone}</code>",
     ]
-    # Qayerdan kelgani — spam tahlili uchun (IP, joylashuv)
+    # Qayerdan kelgani — spam tahlili uchun (IP, joylashuv, qurilma, xarita)
     if getattr(lead, "geo_info", ""):
         lines.append(f"🌍 Joylashuv: {lead.geo_info}")
     if getattr(lead, "ip_address", ""):
         lines.append(f"🔗 IP: <code>{lead.ip_address}</code>")
+    # Xarita havolalari — menejur bir bosishda mijozi xaritada ko'radi
+    _maps = _lead_maps_urls(lead)
+    if _maps:
+        lines.append(f"🗺 [Google Maps]({_maps['google']}) · [Yandex]({_maps['yandex']})")
+    if getattr(lead, "device_info", ""):
+        extra = getattr(lead, "device_extra", "") or ""
+        lines.append(f"💻 Qurilma: {lead.device_info}{(' (' + extra + ')') if extra else ''}")
     if lead.interest:
         lines.append(f"📚 Kurslar: {lead.interest}")
     if lead.note:

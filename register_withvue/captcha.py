@@ -63,34 +63,36 @@ def verify_captcha(captcha_id, answer_text, created_hint=None):
     created_hint — captcha berilgan vaqt (epoch). Berilmasa cache'dan
     olinadi. Muvaffaqiyatli tekshiruvdan keyin captcha o'chadi (bir martalik).
 
-    Qaytaradi: (ok: bool, error: str|None)
+    Qaytaradi: (ok: bool, error: str|None, code: str|None)
+    Kod front-end tilga qarab tarjima qiladi: missing/used/expired/
+    too_fast/wrong.
     """
     if not captcha_id or answer_text is None:
-        return False, "Captcha to'ldirilmagan"
+        return False, "Captcha to'ldirilmagan", "missing"
 
     key = _captcha_key(str(captcha_id))
     data = cache.get(key)
     if data is None:
         if created_hint and (time.time() - float(created_hint)) < CAPTCHA_TTL_SECONDS:
             # Cache'da yo'q lekin yangi — ehtimol allaqachon ishlatilgan
-            return False, "Captcha allaqachon ishlatilgan — yangisini oling"
-        return False, "Captcha muddati tugadi — sahifani yangilang"
+            return False, "Captcha allaqachon ishlatilgan — yangisini oling", "used"
+        return False, "Captcha muddati tugadi — sahifani yangilang", "expired"
 
     # juda tez yuborish — bot belgisi
     elapsed = time.time() - data["created"]
     if elapsed < CAPTCHA_MIN_FILL_SECONDS:
         cache.delete(key)
-        return False, "Juda tez yuborildi — yana urinib ko'ring"
+        return False, "Juda tez yuborildi — yana urinib ko'ring", "too_fast"
 
     try:
         typed = int(str(answer_text).strip())
     except (ValueError, TypeError):
         cache.delete(key)
-        return False, "Captcha javobi noto'g'ri"
+        return False, "Captcha javobi noto'g'ri", "wrong"
 
     if typed != data["answer"]:
         cache.delete(key)
-        return False, "Captcha javobi noto'g'ri"
+        return False, "Captcha javobi noto'g'ri", "wrong"
 
     cache.delete(key)  # bir martalik
-    return True, None
+    return True, None, None

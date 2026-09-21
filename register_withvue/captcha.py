@@ -16,9 +16,14 @@ va bir javob bir martaga ishlaydi.
 import secrets
 import time
 
-from django.core.cache import cache
+from django.core.cache import caches
 
 from django.http import JsonResponse
+
+# Alohida cache: captcha endpointini to'lib-toshqin so'rovlar bilan
+# bosib, asosiy cache'dagi rate-limit hisoblagichlarini evict
+# qilinishining oldini oladi (locmem LRU).
+cache = caches["captcha"]
 
 CAPTCHA_TTL_SECONDS = 600  # 10 daqiqa — keyin eskiradi
 CAPTCHA_MIN_FILL_SECONDS = 2  # odam savolni o'qib javob yozishi kerak

@@ -3285,11 +3285,18 @@ def register_student(request):
         return JsonResponse({"error": "Method not allowed"}, status=405)
     # Ommaviy endpoint — botlar yuzlab soxta o'quvchi yaratmasin.
     # Bitta IP 1 soatda 20 tagacha ro'yxatdan o'tishi mumkin.
-    limited = check_rate_limit(
-        request, key_prefix="register", limit=20, window_seconds=3600
-    )
-    if limited:
-        return limited
+    # Ommaviy himoya: JWT'siz (haqiqiy tashqi mijoz) so'roqlar IP
+    # bo'yicha cheklanadi. Xodim paneli (excellence.vue) ham shu
+    # endpoint'dan JWT bilan foydalanadi — ularga limit qo'llanilmaydi,
+    # aks holda panelda o'quvchi qo'shayotganda 429 olardi.
+    from .access import caller_phone
+
+    if not caller_phone(request):
+        limited = check_rate_limit(
+            request, key_prefix="register", limit=20, window_seconds=3600
+        )
+        if limited:
+            return limited
     try:
         data = json.loads(request.body)
         phone = data.get("phone", "").strip()

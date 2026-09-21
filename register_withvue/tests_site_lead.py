@@ -42,19 +42,20 @@ class SiteLeadTests(TestCase):
     def _solve_captcha(self):
         """Haqiqiy captcha oladi va to'g'ri javobini qaytaradi."""
         import re
-        import time as _time
 
         res = self.client.get("/api/captcha/new/")
         data = json.loads(res.content)
         a, b = re.findall(r"\d+", data["question"])
         # captcha moduli juda tez yuborilganini rad etadi — 2s kutmaslik
-        # uchun cache'dagi created ni biroz orqaga suramiz
-        from django.core.cache import cache as _c
+        # uchun cache'dagi created ni biroz orqaga suramiz (captcha
+        # alohida "captcha" cache'ida turadi — settings.CACHES)
+        from django.core.cache import caches
 
-        entry = _c.get(f"captcha:{data['id']}")
+        _c = caches["captcha"]
+        key = f"captcha:{data['id']}"
+        entry = _c.get(key)
         entry["created"] -= 10
-        _c.set(f"captcha:{data['id']}", entry, timeout=600)
-        _time.sleep(0)  # noqa: S101 — o'qish uchun qoldirildi
+        _c.set(key, entry, timeout=600)
         return {
             "captcha_id": data["id"],
             "captcha_answer": int(a) + int(b) if "+" in data["question"] else int(a) - int(b),

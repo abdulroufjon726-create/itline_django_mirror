@@ -213,7 +213,15 @@ SIMPLE_JWT = {
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-    }
+    },
+    # Captcha alohida cache'da — hujumchi captcha endpointini qo'p
+    # so'rovlar bilan to'ldirib, locmem LRU eviksiyasi orqali rate-limit
+    # hisoblagichlarini to'kib yuborishi mumkin edi (adversarial review).
+    "captcha": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "captcha-store",
+        "OPTIONS": {"MAX_ENTRIES": 5000},
+    },
 }
 
 

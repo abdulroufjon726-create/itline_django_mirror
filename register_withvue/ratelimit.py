@@ -15,16 +15,19 @@ from django.http import JsonResponse
 def _client_ip(request):
     """Haqiqiy mijoz IP'sini aniqlaydi.
 
-    Render/nginx old proksi sifatida ishlaydi — shuning uchun HAProxy
-    formatidagi X-Forwarded-For'tan O'NGDAGI (oxirgi) yozuv olamiz:
-    uni proksining o'zi qo'shadi va mijoz soxtalashtira olmaydi.
-    Chapdagi (birinchi) yozuv esa mijoz tomonidan yuboriladi — uni
-    hisobga olsak, 'X-Forwarded-For: 1.2.3.4' yuborib limitni
-    chetlab o'tish mumkin bo'lardi.
+    Render konventsiyasi: mijoz IP'si X-Forwarded-For'ning BIRINCHI
+    (chapdagi) yozuvida turadi — Render edge uni o'zi qo'shadi
+    (xavfsizlik: mijoz o'z XFF'ini yuborsa ham, Render haqiqiy IP'ni
+    keyin yozadi; birinchi yozuv eng ishonchli mijoz manzili).
+    Oxirgi yozuv Render'ning ichki proxy manzili (10.x.x.x) bo'lib
+    qoladi — uni olsak barcha foydalanuvchilar bitta IP'da ko'rinardi
+    va geo aniqlanmasdi (live testda aniqlangan).
     """
     forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
     if forwarded:
-        return forwarded.split(",")[-1].strip()[:64]
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first[:64]
     return (request.META.get("REMOTE_ADDR") or "")[:64]
 
 

@@ -8595,6 +8595,10 @@ def get_leads(request):
                 "interest": l.interest,
                 "note": l.note,
                 "source_sheet": l.source_sheet,
+                # Spam tahlili: qayerdan kelgani
+                "ip_address": l.ip_address,
+                "geo_info": l.geo_info,
+                "created_at": l.created_at.isoformat(),
             }
             for l in qs
         ]

@@ -24,8 +24,16 @@ _GEO_TIMEOUT = 3  # sekund — sayt sekinlashmasin
 
 
 def _fetch_geo(ip):
-    """ip-api.com dan joylashuvni oladi. Xato bo'lsa None."""
-    url = f"http://ip-api.com/json/{ip}?fields=country,city,regionName,isp,query"
+    """ip-api.com dan joylashuv + hosting/proxy belgisini oladi.
+
+    Xato bo'lsa None. `proxy, hosting, mobile` maydonlari ip-api
+    security-extension'idan: proxy=True yoki hosting=True bo'lgan IP
+    VPN/Datacenter (AWS, Google Cloud, NordVPN va h.k.) bo'ladi.
+    """
+    url = (
+        f"http://ip-api.com/json/{ip}"
+        "?fields=country,city,regionName,isp,query,proxy,hosting,mobile"
+    )
     try:
         with urllib.request.urlopen(url, timeout=_GEO_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -35,10 +43,20 @@ def _fetch_geo(ip):
                     "city": str(data.get("city") or "")[:50],
                     "region": str(data.get("regionName") or "")[:50],
                     "isp": str(data.get("isp") or "")[:100],
+                    "proxy": bool(data.get("proxy")),
+                    "hosting": bool(data.get("hosting")),
+                    "mobile": bool(data.get("mobile")),
                 }
     except Exception:  # noqa: BLE001 — tashqi xizmat muhim emas
         logger.debug("Geo lookup failed for %s", ip, exc_info=True)
     return None
+
+
+def is_vpn_or_hosting(geo):
+    """Geo ma'lumoti VPN/proxy/datacenter belgisini o'z ichiga oladimi."""
+    if not geo:
+        return False
+    return bool(geo.get("proxy") or geo.get("hosting"))
 
 
 def geo_for_ip(ip):

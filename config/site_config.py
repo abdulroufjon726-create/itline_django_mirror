@@ -35,6 +35,22 @@ PANEL_BASE_URL = os.environ.get("PANEL_BASE_URL", "https://crmfr.vercel.app").rs
 # Landing sahifa
 LANDING_BASE_URL = os.environ.get("LANDING_BASE_URL", "https://excellences-school.vercel.app").rstrip("/")
 
+# ── Brend materiallari (ommaviy) ──
+
+# Qo'llab-quvvatlash aloqalari — landing, bot xabarlari, rasmiylashtirish
+SUPPORT_PHONE = os.environ.get("SUPPORT_PHONE", "+998 90 562 33 45")
+SUPPORT_EMAIL = os.environ.get("SUPPORT_EMAIL", "info@itline.uz")
+SUPPORT_TG_USERNAME = os.environ.get("SUPPORT_TG_USERNAME", "itline_support")
+
+# Telegram guruh QR kodi (rasm URL) — to'lov guruhiga qo'shilish uchun
+# Lokalda: panel "Veb-sayt" QR kartochkasi shu fayldan ishlatadi
+# (crm_fr/src/icon/telegram_QR.png).
+TELEGRAM_QR_URL = os.environ.get("TELEGRAM_QR_URL", "")
+
+# Logotip (rasm URL) — Telegram xabarlariga attach qilinadi (bo'sh bo'lsa
+# yuborilmaydi). Lokalda fayl: crm_fr/src/icon/itline.png
+LOGO_URL = os.environ.get("LOGO_URL", "")
+
 # ── Telegram SUPERADMIN — barcha muhim xabarlar shunga boradi ──
 
 # Botga birinchi /start qilganda avtomatik menejer sifatida ulanadigan

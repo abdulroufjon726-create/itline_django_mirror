@@ -58,6 +58,8 @@ MIDDLEWARE = [
     # (ommaviy ro'yxatdagi: login, register, webhook'lar). Deny-by-default:
     # yangi qo'shilgan endpoint tasodifan ochiq qolmaydi.
     "config.middleware.ApiAuthGateMiddleware",
+    # VPN/proxy/datacenter IP'lardan ommaviy form so'rovlarni bloklaydi
+    "config.middleware.VpnBlockMiddleware",
     # WhiteNoise static uchun
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",

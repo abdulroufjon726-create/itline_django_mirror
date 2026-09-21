@@ -14,6 +14,8 @@ from django.http import HttpResponse, JsonResponse, HttpResponseForbidden
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth.hashers import make_password, check_password
 from django.db import models as db_models
+
+from .errors import safe_error
 from rest_framework import serializers
 
 
@@ -745,7 +747,7 @@ def manager_register(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -836,7 +838,7 @@ def manager_login(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 def get_managers(request):
@@ -865,7 +867,7 @@ def get_managers(request):
         )
         return JsonResponse(managers, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -941,7 +943,7 @@ def update_manager(request, manager_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -972,7 +974,7 @@ def delete_manager(request, manager_id):
         )
         return JsonResponse({"message": "Menejer deaktivatsiya qilindi!"})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -1002,7 +1004,7 @@ def get_coin_balance(request, student_id):
             }
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_all_coin_balances(request):
@@ -1037,7 +1039,7 @@ def get_all_coin_balances(request):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -1104,7 +1106,7 @@ def add_coin(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -1129,7 +1131,7 @@ def delete_coin_transaction(request, txn_id):
             {"message": "Tranzaksiya bekor qilindi va balans qayta hisoblandi!"}
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -1187,7 +1189,7 @@ def set_coin_balance(request, student_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -1225,7 +1227,7 @@ def get_teachers(request):
         )
         return JsonResponse(teachers, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -1290,7 +1292,7 @@ def create_teacher(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -1380,7 +1382,7 @@ def delete_teacher(request, teacher_id):
             }
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -1493,7 +1495,7 @@ def update_teacher(request, teacher_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -1525,7 +1527,7 @@ def update_teacher_penalty_limit(request, teacher_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -1561,7 +1563,7 @@ def reassign_students(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -1772,7 +1774,7 @@ def get_teachers_overview(request):
         try:
             start, end, months = _range_months(request)
         except RangeError as e:
-            return JsonResponse({"error": str(e)}, status=400)
+            return JsonResponse({"error": safe_error(e)}, status=400)
 
         # O'quvchilar soni — holatlar kesimida (faol / kutilmoqda / bog'lanish)
         by_status = {}
@@ -1857,7 +1859,7 @@ def get_teachers_overview(request):
             }
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_teacher_history(request, teacher_id):
@@ -1881,7 +1883,7 @@ def get_teacher_history(request, teacher_id):
         try:
             start, end, months = _range_months(request)
         except RangeError as e:
-            return JsonResponse({"error": str(e)}, status=400)
+            return JsonResponse({"error": safe_error(e)}, status=400)
 
         students = list(
             _real_students()
@@ -2011,7 +2013,7 @@ def get_teacher_history(request, teacher_id):
             }
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_students_overview(request):
@@ -2044,7 +2046,7 @@ def get_students_overview(request):
             period_counts = status_counts(qs)
             qs = status_filter(request, qs)
         except RangeError as e:
-            return JsonResponse({"error": str(e)}, status=400)
+            return JsonResponse({"error": safe_error(e)}, status=400)
 
         teacher_id = (request.GET.get("teacher_id") or "").strip()
         if teacher_id in ("none", "null", "0"):
@@ -2115,7 +2117,7 @@ def get_students_overview(request):
             }
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 # ─────────────────────────────
@@ -2307,7 +2309,7 @@ def import_students(request):
         try:
             default_status = clean_status(data.get("default_status"), default="pending")
         except RangeError as e:
-            return JsonResponse({"error": str(e)}, status=400)
+            return JsonResponse({"error": safe_error(e)}, status=400)
 
         # Ustoz va guruhlarni nom bo'yicha topish uchun lug'atlar —
         # sikl ichida bazaga tegmaymiz
@@ -2594,7 +2596,7 @@ def import_students(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 def _safe_int(value):
@@ -2727,7 +2729,7 @@ def transfer_students(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -2747,7 +2749,7 @@ def get_stage_prices(request):
         )
         return JsonResponse(prices, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -2792,7 +2794,7 @@ def update_stage_price(request, stage):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -2822,7 +2824,7 @@ def get_students(request):
             qs = apply_datetime_range(qs, "created_at", start, end)
             qs = status_filter(request, qs)
         except RangeError as e:
-            return JsonResponse({"error": str(e)}, status=400)
+            return JsonResponse({"error": safe_error(e)}, status=400)
 
         # Xavfsizlik (IDOR): oddiy o'quvchi butun ro'yxatni (telefonlar,
         # balanslar, holatlar) ko'ra olmasligi kerak — faqat o'z guruh
@@ -2865,7 +2867,7 @@ def get_students(request):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -2913,7 +2915,7 @@ def update_student(request, student_id):
             try:
                 new_status = clean_status(data["status"], default=student.status)
             except RangeError as e:
-                return JsonResponse({"error": str(e)}, status=400)
+                return JsonResponse({"error": safe_error(e)}, status=400)
             if new_status != student.status:
                 student.status = new_status
                 student.status_changed_at = timezone.now()
@@ -2984,7 +2986,7 @@ def update_student(request, student_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # Solishtirish uchun kalit shu uzunlikdan qisqa bo'lsa ishlatilmaydi —
@@ -3383,7 +3385,7 @@ def register_student(request):
                 )
             )
         except RangeError as e:
-            return JsonResponse({"error": str(e)}, status=400)
+            return JsonResponse({"error": safe_error(e)}, status=400)
 
         student = Student.objects.create(
             name=name,
@@ -3462,7 +3464,7 @@ def register_student(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -3597,7 +3599,7 @@ def login_student(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -3631,7 +3633,7 @@ def get_lessons(request):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -3729,7 +3731,7 @@ def create_lesson(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -3764,7 +3766,7 @@ def get_attendance(request, lesson_id):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -3876,7 +3878,7 @@ def update_attendance(request, attendance_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -3966,7 +3968,7 @@ def attendance_group_day(request):
             }
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def attendance_group_month(request):
@@ -4047,7 +4049,7 @@ def attendance_group_month(request):
             {"group_id": group.id, "month": month, "dates": dates, "students": rows}
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_student_attendance(request, student_id):
@@ -4099,7 +4101,7 @@ def get_student_attendance(request, student_id):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_monthly_absences(request):
@@ -4138,7 +4140,7 @@ def get_monthly_absences(request):
 
         return JsonResponse(result)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 # ─────────────────────────────
@@ -4164,7 +4166,7 @@ def get_attendance_coin_settings(request):
             }
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -4230,7 +4232,7 @@ def update_attendance_coin_settings(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -4271,7 +4273,7 @@ def get_student_penalties(request, student_id):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_teacher_students_penalties(request, teacher_id):
@@ -4310,7 +4312,7 @@ def get_teacher_students_penalties(request, teacher_id):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -4357,7 +4359,7 @@ def create_student_penalty(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -4380,7 +4382,7 @@ def delete_student_penalty(request, penalty_id):
         penalty.delete()
         return JsonResponse({"message": "Ja'zo o'chirildi!"})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -4439,7 +4441,7 @@ def get_payments(request, student_id):
             )
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_student_wallet(request, student_id):
@@ -4467,7 +4469,7 @@ def get_student_wallet(request, student_id):
             return JsonResponse({"error": "Student topilmadi"}, status=404)
         return JsonResponse(compute_wallet(student))
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_all_payments(request):
@@ -4500,7 +4502,7 @@ def get_all_payments(request):
             try:
                 start, end = parse_range(request)
             except RangeError as e:
-                return JsonResponse({"error": str(e)}, status=400)
+                return JsonResponse({"error": safe_error(e)}, status=400)
             months = months_in_range(start, end)
             if months:
                 qs = qs.filter(month__in=months)
@@ -4508,7 +4510,7 @@ def get_all_payments(request):
         try:
             qs = status_filter(request, qs, field="student__status")
         except RangeError as e:
-            return JsonResponse({"error": str(e)}, status=400)
+            return JsonResponse({"error": safe_error(e)}, status=400)
 
         if teacher_id:
             try:
@@ -4562,7 +4564,7 @@ def get_all_payments(request):
             )
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -4673,7 +4675,7 @@ def generate_payments(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -5042,7 +5044,7 @@ def confirm_payment(request, payment_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -5156,7 +5158,7 @@ def update_payment_amount(request, payment_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -5464,7 +5466,7 @@ def get_cash_sessions(request):
     try:
         start, end, months = _range_months(request)
     except RangeError as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
     qs = apply_date_range(CashSession.objects.all(), "date", start, end)
     sessions = [_session_dict(s) for s in qs]
@@ -5618,7 +5620,7 @@ def update_payment_settings(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -5681,7 +5683,7 @@ def create_payment_request(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 def _payment_request_row(pr, include_receipt=False):
@@ -5722,7 +5724,7 @@ def get_payment_requests(request):
         ]
         return JsonResponse(rows, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def pending_requests_count(request):
@@ -5758,7 +5760,7 @@ def get_student_payment_requests(request, student_id):
             [_payment_request_row(pr) for pr in qs[:50]], safe=False
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -5893,7 +5895,7 @@ def accept_payment_request(request, req_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -5930,7 +5932,7 @@ def reject_payment_request(request, req_id):
         )
         return JsonResponse({"message": "So'rov rad etildi", "status": pr.status})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 def get_groups(request):
@@ -5958,7 +5960,7 @@ def get_groups(request):
         serializer = GroupSerializer(groups, many=True)
         return JsonResponse(serializer.data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_group(request, group_id):
@@ -5984,7 +5986,7 @@ def get_group(request, group_id):
         serializer = GroupSerializer(group)
         return JsonResponse(serializer.data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def _as_time(value):
@@ -6257,7 +6259,7 @@ def create_group(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "JSON format noto'g'ri"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": f"Xato: {str(e)}"}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -6362,7 +6364,7 @@ def update_group(request, group_id):
                 group.students.set(student_ids)
             except (ValueError, TypeError) as e:
                 return JsonResponse(
-                    {"error": f"Invalid student IDs: {str(e)}"}, status=400
+                    {"error": safe_error(e)}, status=400
                 )
 
         log_action(
@@ -6382,7 +6384,7 @@ def update_group(request, group_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -6436,7 +6438,7 @@ def delete_group(request, group_id):
             {"message": "Guruh o'chirildi!", "deleted_students": deleted_students}
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -6471,7 +6473,7 @@ def get_student_coins(request, student_id):
             {"student_id": student.id, "coin_balance": student.coin_balance}
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_coin_transactions(request, student_id):
@@ -6513,7 +6515,7 @@ def get_coin_transactions(request, student_id):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -6600,7 +6602,7 @@ def give_manual_coins(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 def get_group_leaderboard(request):
@@ -6644,7 +6646,7 @@ def get_group_leaderboard(request):
 
         return JsonResponse(rows[:limit], safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_receipt_settings(request):
@@ -6708,7 +6710,7 @@ def update_receipt_settings(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -6739,7 +6741,7 @@ def preview_receipt(request):
             template = template.replace(k, v)
         return JsonResponse({"preview": template})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -6772,7 +6774,7 @@ def send_message_leads(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -6806,7 +6808,7 @@ def send_message_teachers(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_leaderboard(request):
@@ -6837,7 +6839,7 @@ def get_leaderboard(request):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 # ─────────────────────────────
@@ -6862,7 +6864,7 @@ def get_products(request):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_all_products(request):
@@ -6887,7 +6889,7 @@ def get_all_products(request):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -6957,7 +6959,7 @@ def create_product(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -7003,7 +7005,7 @@ def update_product(request, product_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -7028,7 +7030,7 @@ def delete_product(request, product_id):
         product.delete()
         return JsonResponse({"message": "Mahsulot o'chirildi!"})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -7117,7 +7119,7 @@ def create_order(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 def get_student_orders(request, student_id):
@@ -7153,7 +7155,7 @@ def get_student_orders(request, student_id):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_all_orders(request):
@@ -7189,7 +7191,7 @@ def get_all_orders(request):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -7268,7 +7270,7 @@ def resolve_order(request, order_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -7283,7 +7285,7 @@ def get_courses(request):
         serializer = CourseSerializer(courses, many=True)
         return JsonResponse(serializer.data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_course(request, course_id):
@@ -7301,7 +7303,7 @@ def get_course(request, course_id):
         serializer = CourseSerializer(course)
         return JsonResponse(serializer.data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -7345,7 +7347,7 @@ def create_course(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -7420,7 +7422,7 @@ def update_course(request, course_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -7461,7 +7463,7 @@ def delete_course(request, course_id):
                 },
                 status=400,
             )
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -7545,7 +7547,7 @@ def create_course_level(request, course_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -7620,7 +7622,7 @@ def update_course_level(request, level_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -7655,7 +7657,7 @@ def delete_course_level(request, level_id):
             {"message": "Daraja o'chirildi", "groups_detached": groups}
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -7762,7 +7764,7 @@ def create_room(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -7816,7 +7818,7 @@ def update_room(request, room_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -7847,7 +7849,7 @@ def delete_room(request, room_id):
         )
         return JsonResponse({"message": "Xona o'chirildi", "groups_detached": groups})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 def get_room_schedule(request):
@@ -7938,7 +7940,7 @@ def get_news(request):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_active_news(request):
@@ -7962,7 +7964,7 @@ def get_active_news(request):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_news_detail(request, news_id):
@@ -7993,7 +7995,7 @@ def get_news_detail(request, news_id):
             }
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def _require_news_author(request):
@@ -8097,7 +8099,7 @@ def create_news(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -8185,7 +8187,7 @@ def update_news(request, news_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -8215,7 +8217,7 @@ def delete_news(request, news_id):
         )
         return JsonResponse({"message": "Yangilik o'chirildi!"})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 # ─────────────────────────────
@@ -8241,7 +8243,7 @@ def get_expenses(request):
         try:
             start, end = parse_range(request)
         except RangeError as e:
-            return JsonResponse({"error": str(e)}, status=400)
+            return JsonResponse({"error": safe_error(e)}, status=400)
         qs = apply_date_range(qs, "date", start, end)
 
         data = [
@@ -8258,7 +8260,7 @@ def get_expenses(request):
         ]
         return JsonResponse(data, safe=False)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -8337,7 +8339,7 @@ def create_expense(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -8394,7 +8396,7 @@ def update_expense(request, expense_id):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 @csrf_exempt
@@ -8427,7 +8429,7 @@ def delete_expense(request, expense_id):
         )
         return JsonResponse({"message": "Xarajat o'chirildi!"})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=400)
+        return JsonResponse({"error": safe_error(e)}, status=400)
 
 
 def get_finance_summary(request):
@@ -8510,7 +8512,7 @@ def get_finance_summary(request):
             }
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
     """
     Berilgan oy uchun to'liq moliyaviy hisobot:
     - jami studentlar soni
@@ -8571,7 +8573,7 @@ def get_finance_summary(request):
             }
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 # ─────────────────────────────
@@ -8619,7 +8621,7 @@ def get_leads(request):
 
         return JsonResponse({"count": len(leads), "sheets": sheets, "leads": leads})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 # ───────────────────────────────────────────────
@@ -8953,7 +8955,7 @@ def get_ad_channels(request):
         ]
         return JsonResponse({"count": len(channels), "channels": channels})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_graduates(request):
@@ -8984,7 +8986,7 @@ def get_graduates(request):
         ]
         return JsonResponse({"count": len(data), "graduates": data})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 # ─────────────────────────────
@@ -9063,7 +9065,7 @@ def tg_status(request):
             }
         )
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def _do_send(students, text, kind, month=""):
@@ -9124,7 +9126,7 @@ def send_message_student(request):
         )
         return JsonResponse(result)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -9163,7 +9165,7 @@ def send_message_group(request):
         )
         return JsonResponse(result)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def build_lesson_reminder_text(group, when_date=None):
@@ -9244,7 +9246,7 @@ def send_lesson_reminders(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -9279,7 +9281,7 @@ def send_message_all(request):
         )
         return JsonResponse(result)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -9330,7 +9332,7 @@ def send_message_students(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def get_message_history(request):
@@ -9350,7 +9352,7 @@ def get_message_history(request):
         try:
             start, end = parse_range(request)
         except RangeError as e:
-            return JsonResponse({"error": str(e)}, status=400)
+            return JsonResponse({"error": safe_error(e)}, status=400)
 
         qs = apply_datetime_range(
             SentMessage.objects.select_related("student"), "created_at", start, end
@@ -9376,7 +9378,7 @@ def get_message_history(request):
         ]
         return JsonResponse({"messages": data, "range": range_payload(start, end)})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 # ─────────────────────────────
@@ -9421,7 +9423,7 @@ def delete_student(request, student_id):
         )
         return JsonResponse({"success": True, "deleted": name})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -9470,7 +9472,7 @@ def bulk_delete_students(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 def ping(request):
@@ -9562,7 +9564,7 @@ def send_verification_code(request):
 
         return JsonResponse({"sent": True, "expires_in": CODE_TTL_MINUTES * 60})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -9621,7 +9623,7 @@ def check_verification_code(request):
         pv.save(update_fields=["attempts", "verified_at"])
         return JsonResponse({"verified": True})
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 # ─────────────────────────────
@@ -9734,7 +9736,7 @@ def change_password(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)
 
 
 @csrf_exempt
@@ -9823,4 +9825,4 @@ def update_profile(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return JsonResponse({"error": safe_error(e)}, status=500)

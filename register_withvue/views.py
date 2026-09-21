@@ -2154,6 +2154,29 @@ def _import_row_name(row):
     return name, surname
 
 
+# Import parol alifbosi: chalkash harflar (0/O, 1/l/I) va til belgilari
+# yo'q — o'quvchi qog'ozdan o'qib xatosiz kirishi uchun.
+_IMPORT_PASSWORD_ALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+_IMPORT_PASSWORD_LEN = 8
+
+
+def _generate_import_password():
+    """Import qilingan o'quvchi uchun tasodifiy, o'qish oson parol.
+
+    8 belgi: 2 ta raqam + 6 ta harf (chalkash belgilarsiz). `secrets`
+    moduli — kriptografik tasodif, taxminlash imkonini beradi.
+    """
+    import secrets
+
+    rng = secrets.SystemRandom()
+    letters = "".join(rng.choice(_IMPORT_PASSWORD_ALPHABET) for _ in range(_IMPORT_PASSWORD_LEN - 2))
+    digits = "".join(rng.choice("23456789") for _ in range(2))
+    # Raqamlarni parol davriga aralashtirib qo'yamiz
+    chars = list(letters + digits)
+    rng.shuffle(chars)
+    return "".join(chars)
+
+
 IMPORT_GROUP_TIME_WORDS = {
     "09:00": "09:00", "9:00": "09:00", "9.00": "09:00", "09.00": "09:00",
     "10:00": "10:00", "10.00": "10:00", "11:00": "11:00", "11.00": "11:00",
@@ -2469,6 +2492,11 @@ def import_students(request):
             if group and not teacher:
                 teacher = group.teacher
 
+            # Xavfsizroq parol: ism-familiya o'rniga tasodifiy o'qiladigan
+            # parol generatsiya qilinadi (telegram.py'dagi o'qish qoidalari
+            # bilan mos — 0/1/O/I chiqarib tashlangan). Bot uni birinchi
+            # ulanishda o'quvchiga ko'rsatadi.
+            import_password = _generate_import_password()
             student = Student(
                 name=name,
                 surname=surname,
@@ -2477,6 +2505,10 @@ def import_students(request):
                 phone=phone or None,
                 phone2=str(raw.get("phone2") or "").strip()[:50],
                 teacher=teacher,
+                password=make_password(import_password),
+                # Bot shu maydondan boshlang'ich parolni ko'rsatadi
+                # (o'quvchi o'zinikini o'rnatganda tozalanadi)
+                initial_password=import_password,
                 stage=_safe_int(raw.get("stage")) or 1,
                 schedule=(group.schedule if group else "odd"),
                 status=status,
@@ -2484,7 +2516,7 @@ def import_students(request):
                 note=str(raw.get("note") or "").strip(),
                 source="import",
             )
-            to_create.append((student, group))
+            to_create.append((student, group, import_password))
             results.append(
                 {
                     "line": line,
@@ -2494,6 +2526,9 @@ def import_students(request):
                     "teacher_name": teacher.name if teacher else "",
                     "group_name": group.name if group else "",
                     "student_status": status,
+                    # Parol dry_run'da ham ko'rsatiladi — menejer jadvalni
+                    # chop etib, o'quvchilarga topshirishi uchun
+                    "password": import_password,
                 }
             )
 
@@ -2524,20 +2559,20 @@ def import_students(request):
             # "Guruh vaqti" ustuni bilan keltirilgan tuzatishlar
             for group_id, t in pending_time_updates.items():
                 Group.objects.filter(id=group_id).update(lesson_time=t)
-            for student, _group in to_create:
+            for student, _group, _pw in to_create:
                 student.status_changed_at = now
-            Student.objects.bulk_create([s for s, _ in to_create])
+            Student.objects.bulk_create([s for s, _g, _pw in to_create])
 
             # bulk_create SQLite'da ham ID beradi (Django 4+), lekin
             # M2M ni o'zi bog'lamaydi — guruhlarga alohida qo'shamiz
             by_group = {}
-            for student, group in to_create:
+            for student, group, _pw in to_create:
                 if group and student.id:
                     by_group.setdefault(group.id, []).append(student.id)
             # Yangi ochilgan guruhlar groups_by_id lug'atida yo'q —
             # ular to'g'ridan-to'g'ri to_create'dagi obyektlardan olamiz
             linkable = dict(groups_by_id)
-            for _student, g in to_create:
+            for _student, g, _pw in to_create:
                 if g is not None:
                     linkable[g.id] = g
             for group_id, ids in by_group.items():
@@ -3248,6 +3283,13 @@ def register_student(request):
     """O'quvchi ro'yxatdan o'tkazish."""
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
+    # Ommaviy endpoint — botlar yuzlab soxta o'quvchi yaratmasin.
+    # Bitta IP 1 soatda 20 tagacha ro'yxatdan o'tishi mumkin.
+    limited = check_rate_limit(
+        request, key_prefix="register", limit=20, window_seconds=3600
+    )
+    if limited:
+        return limited
     try:
         data = json.loads(request.body)
         phone = data.get("phone", "").strip()
@@ -3296,9 +3338,15 @@ def register_student(request):
         # ADMIN_PASSWORD/EXCELLENCE_PASSWORD muhit o'zgaruvchisidan keladi
         # va standarti bo'sh satr — oddiy tenglikda ("" == "") maydonni
         # to'ldirmagan HAR QANDAY odam ustoz/menejer profiliga aylanardi.
-        is_admin = bool(ADMIN_PASSWORD) and admin_password == ADMIN_PASSWORD
-        is_excellence = (
-            bool(EXCELLENCE_PASSWORD) and excellence_password == EXCELLENCE_PASSWORD
+        # compare_digest — parolni solishtirish vaqti qiymatga bog'liq
+        # bo'lmasin (timing attack oldini olish).
+        import secrets as _secrets
+
+        is_admin = bool(ADMIN_PASSWORD) and _secrets.compare_digest(
+            str(admin_password), ADMIN_PASSWORD
+        )
+        is_excellence = bool(EXCELLENCE_PASSWORD) and _secrets.compare_digest(
+            str(excellence_password), EXCELLENCE_PASSWORD
         )
 
         teacher = None
@@ -8649,6 +8697,18 @@ def _candidate_expiry_windows():
 
 
 @csrf_exempt
+def new_captcha(request):
+    """"Men robot emasman" savoli beradi: {id, question}.
+
+    Landing formasi shuni oladi, foydalanuvchi javobini yozadi,
+    forma bilan birga captcha_id + captcha_answer yuboriladi.
+    """
+    from .captcha import new_captcha as _new
+
+    return _new()
+
+
+@csrf_exempt
 def site_lead(request):
     """Ommaviy: landing saytdan kelgan murojaat (lead) qabul qiladi.
 
@@ -8673,6 +8733,15 @@ def site_lead(request):
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
 
+    # ── "Men robot emasman" tekshiruvi — botlar forma yubora olmasin ──
+    from .captcha import verify_captcha
+
+    ok, captcha_error = verify_captcha(
+        data.get("captcha_id"), data.get("captcha_answer")
+    )
+    if not ok:
+        return JsonResponse({"error": captcha_error, "captcha_failed": True}, status=400)
+
     name = str(data.get("name") or "").strip()[:200]
     phone = str(data.get("phone") or "").strip()[:50]
     interest = str(data.get("interest") or "").strip()[:200]
@@ -8688,12 +8757,20 @@ def site_lead(request):
     if not name:
         name = "Ism ko'rsatilmagan"
 
+    # Qayerdan kelgani: IP, joylashuv, qurilma — spam tahlili + menejer ko'radi
+    from .geo import client_meta, format_geo
+
+    meta = client_meta(request)
+
     lead = Lead.objects.create(
         name=name,
         phone=phone,
         interest=interest,
         note=note,
         source=source or "website",
+        ip_address=meta["ip"],
+        geo_info=format_geo(meta["geo"]),
+        user_agent=meta["user_agent"],
     )
 
     # Menejerlarga tugmali Telegram xabar — fon oqimida, javobni kutmaymiz.
@@ -9622,7 +9699,9 @@ def change_password(request):
         hashed = make_password(new)
         if matched_student:
             matched_student.password = hashed
-            matched_student.save(update_fields=["password"])
+            # Boshlang'ich parolni tozalash — endi bot uni ko'rsatmaydi
+            matched_student.initial_password = ""
+            matched_student.save(update_fields=["password", "initial_password"])
             # Admin/menejer bo'lsa bog'langan Teacher yozuvi ham yangilanadi
             if matched_student.teacher_id:
                 Teacher.objects.filter(id=matched_student.teacher_id).update(

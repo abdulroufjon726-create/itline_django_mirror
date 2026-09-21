@@ -260,27 +260,20 @@ from corsheaders.defaults import default_headers  # noqa: E402
 CORS_ALLOW_HEADERS = (*default_headers, "x-device-id")
 
 # ─────────────────────────────
-# TELEGRAM BOT (o'quvchilarga xabar yuborish)
-# Tavsiya: tokenni Render'da TG_BOT_TOKEN env o'zgaruvchisiga ko'chiring
+# MARKAZGA XOS SOZLAMALAR — BITTA JOYDA
+#
+# Markaz nomi, bot username, manzillar — config/site_config.py da.
+# Boshqa markazga sotganda FAQAT shu fayl + .env o'zgartiriladi.
 # ─────────────────────────────
-TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
+from config import site_config as _site
 
-# Bot username (@siz) — frontend'ga "botga kiring" havolasini ko'rsatish uchun.
-# Bo'sh qoldirilsa `set_webhook` buyrug'i chiqargan nomdan foydalaning.
-TG_BOT_USERNAME = os.environ.get("TG_BOT_USERNAME", "excellence_school_kokand_bot")
-
-# Backend'ning tashqi manzili — webhook'ni ro'yxatdan o'tkazish uchun.
-# Bu maxfiy emas (manzil baribir hammaga ko'rinadi), shuning uchun
-# standart qiymat shu yerda turadi va env o'zgaruvchisi shart emas.
-# Boshqa domenga ko'chsangiz PUBLIC_BASE_URL orqali almashtirasiz.
-PUBLIC_BASE_URL = os.environ.get(
-    "PUBLIC_BASE_URL", "https://itline-django-9s85.onrender.com"
-).rstrip("/")
-
-# Menejer panelining manzili. Telegram lead xabaridagi "Bazaga qo'shish"
-# tugmasi shu manzilga /add-student yo'lini ochadi — lead ma'lumotlari
-# forma URL orqali uzatiladi. Sozlanmasa tugma chiqmaydi.
-PANEL_BASE_URL = os.environ.get("PANEL_BASE_URL", "").rstrip("/")
+TG_BOT_TOKEN = _site.TG_BOT_TOKEN
+TG_BOT_USERNAME = _site.TG_BOT_USERNAME
+PUBLIC_BASE_URL = _site.PUBLIC_BASE_URL
+PANEL_BASE_URL = _site.PANEL_BASE_URL
+SITE_NAME = _site.SITE_NAME
+SITE_NAME_FULL = _site.SITE_NAME_FULL
+LANDING_BASE_URL = _site.LANDING_BASE_URL
 
 # Webhook maxfiy kaliti. Telegram har bir so'rovda buni
 # 'X-Telegram-Bot-Api-Secret-Token' sarlavhasida qaytaradi — shu orqali

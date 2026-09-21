@@ -563,12 +563,19 @@ def find_student_by_phone(phone):
 def student_login_info(student):
     """Saytga kirish ma'lumotlari matni: login (telefon) va parol.
 
-    Import qilingan (paroli o'rnatilmagan) o'quvchining paroli — ism va
-    familiyasi (login_student shu bilan tekshiradi). O'zi maxsus parol
-    o'rnatgan bo'lsa — u hash ko'rinishida saqlanadi va ochib bo'lmaydi.
+    Import qilingan o'quvchining boshlang'ich paroli `initial_password`
+    da ochiq saqlanadi va shu yerda ko'rsatiladi. O'quvchi o'z parolini
+    o'rnatganda (initial_password tozalanadi) — "maxsus parol" rejimi:
+    hash ko'rinishida saqlanganini ochib bo'lmaydi.
     """
     phone = student.phone or "—"
-    if student.password:
+    if student.initial_password:
+        parol_qatori = (
+            f"🔒 Parol: {student.initial_password}\n"
+            "   (boshlang'ich parol — xavfsizlik uchun panelda o'zingiznikiga "
+            "almashtiring: Profil → Parolni o'zgartirish)"
+        )
+    elif student.password:
         parol_qatori = (
             "🔒 Parol: siz o'rnatgan maxsus parol — xavfsizlik uchun uni "
             "ko'rsatib bo'lmaydi. Unutgan bo'lsangiz, administratorga murojaat qiling."
@@ -1031,6 +1038,11 @@ def build_lead_text(lead):
         f"👤 <b>{lead.name}</b>",
         f"📱 <code>{lead.phone}</code>",
     ]
+    # Qayerdan kelgani — spam tahlili uchun (IP, joylashuv)
+    if getattr(lead, "geo_info", ""):
+        lines.append(f"🌍 Joylashuv: {lead.geo_info}")
+    if getattr(lead, "ip_address", ""):
+        lines.append(f"🔗 IP: <code>{lead.ip_address}</code>")
     if lead.interest:
         lines.append(f"📚 Kurslar: {lead.interest}")
     if lead.note:

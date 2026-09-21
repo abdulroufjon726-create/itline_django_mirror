@@ -29,13 +29,36 @@ class SiteLeadTests(TestCase):
             "source": "website",
         }
 
-    def _post(self, payload=None):
+    def _post(self, payload=None, with_captcha=True):
         body = self.payload if payload is None else payload
+        if with_captcha:
+            body = {**body, **self._solve_captcha()}
         return self.client.post(
             self.url,
             data=json.dumps(body),
             content_type="application/json",
         )
+
+    def _solve_captcha(self):
+        """Haqiqiy captcha oladi va to'g'ri javobini qaytaradi."""
+        import re
+        import time as _time
+
+        res = self.client.get("/api/captcha/new/")
+        data = json.loads(res.content)
+        a, b = re.findall(r"\d+", data["question"])
+        # captcha moduli juda tez yuborilganini rad etadi — 2s kutmaslik
+        # uchun cache'dagi created ni biroz orqaga suramiz
+        from django.core.cache import cache as _c
+
+        entry = _c.get(f"captcha:{data['id']}")
+        entry["created"] -= 10
+        _c.set(f"captcha:{data['id']}", entry, timeout=600)
+        _time.sleep(0)  # noqa: S101 — o'qish uchun qoldirildi
+        return {
+            "captcha_id": data["id"],
+            "captcha_answer": int(a) + int(b) if "+" in data["question"] else int(a) - int(b),
+        }
 
     @patch("register_withvue.telegram.notify_managers_lead")
     def test_creates_lead_and_notifies(self, notify):
@@ -89,3 +112,44 @@ class SiteLeadTests(TestCase):
         res = self._post()
         self.assertEqual(res.status_code, 429)
         self.assertEqual(Lead.objects.count(), 10)
+
+    # ── Captcha (men robot emasman) ──
+
+    @patch("register_withvue.telegram.notify_managers_lead")
+    def test_captcha_required(self, notify):
+        """Captcha'siz murojaat qabul qilinmaydi."""
+        res = self._post(with_captcha=False)
+        self.assertEqual(res.status_code, 400)
+        self.assertTrue(json.loads(res.content)["captcha_failed"])
+        self.assertEqual(Lead.objects.count(), 0)
+
+    @patch("register_withvue.telegram.notify_managers_lead")
+    def test_captcha_wrong_answer_rejected(self, notify):
+        res = self.client.get("/api/captcha/new/")
+        data = json.loads(res.content)
+        res = self._post(
+            {**self.payload, "captcha_id": data["id"], "captcha_answer": 9999},
+            with_captcha=False,
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertTrue(json.loads(res.content)["captcha_failed"])
+        self.assertEqual(Lead.objects.count(), 0)
+
+    @patch("register_withvue.telegram.notify_managers_lead")
+    def test_captcha_single_use(self, notify):
+        """Bir captcha faqat bir marta ishlaydi — ikkinchi marta rad etiladi."""
+        solved = self._solve_captcha()
+        res = self._post({**self.payload, **solved}, with_captcha=False)
+        self.assertEqual(res.status_code, 201)
+        res = self._post({**self.payload, **solved}, with_captcha=False)
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(Lead.objects.count(), 1)
+
+    @patch("register_withvue.telegram.notify_managers_lead")
+    def test_lead_records_ip_and_geo(self, notify):
+        """IP va joylashuv ma'lumoti lead bilan saqlanadi."""
+        res = self._post()
+        self.assertEqual(res.status_code, 201)
+        lead = Lead.objects.get()
+        self.assertEqual(lead.ip_address, "127.0.0.1")  # test client IP
+        # geo tashqi xizmat testda ishlamasligi mumkin — IP esa doim yoziladi

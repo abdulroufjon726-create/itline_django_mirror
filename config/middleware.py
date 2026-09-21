@@ -60,6 +60,7 @@ PUBLIC_API_PATHS = (
     "/api/tg/webhook/",  # Telegram bot (X-Telegram-Bot-Api-Secret-Token)
     "/api/payment-requests/create/",  # o'quvchi chek yuboradi (bot chat_id bilan)
     "/api/site-lead/",  # landing saytdan murojaat (rate-limit view ichida)
+    "/api/captcha/new/",  # men robot emasman savoli (ommaviy forma uchun)
 )
 
 PUBLIC_API_PREFIXES = (

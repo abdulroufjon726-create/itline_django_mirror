@@ -4,6 +4,7 @@ from . import super_views
 from .jwt_auth import refresh_view
 from .views import (
     get_news,
+    new_captcha,
     site_lead,
     get_active_news,
     get_news_detail,
@@ -252,6 +253,7 @@ urlpatterns = [
     # LEADS / REKLAMA (import qilingan baza)
     # ───────────────────────────────
     # Landing sayt shakllari (ro'yxatdan o'tish / qo'llab-quvvatlash)
+    path("captcha/new/", new_captcha, name="captcha-new"),
     path("site-lead/", site_lead, name="site-lead"),
     path("leads/", views.get_leads),
     path("leads/<int:lead_id>/delete/", views.delete_lead),

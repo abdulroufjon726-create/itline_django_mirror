@@ -18,7 +18,7 @@ from django.contrib.auth.hashers import check_password
 from django.test import TestCase
 from django.test.client import RequestFactory
 
-from . import views
+from . import telegram, views
 from .models import (
     AttendanceCoinSettings,
     CashEntry,
@@ -654,6 +654,77 @@ class StudentImportTests(ApiCase):
             content_type="application/json",
         )
         self.assertEqual(views.import_students(stranger).status_code, 403)
+
+    # ── Import paroli: tasodifiy, o'qish oson, botda ko'rsatiladi ──
+
+    def test_import_generates_random_password_shown_in_result(self):
+        """Har bir yangi o'quvchi tasodifiy parol oladi va natijada ko'rinadi."""
+        _, data = self._import(
+            [
+                {"name": "Ali", "surname": "Valiyev", "phone": "+998900000041"},
+                {"name": "Vali", "surname": "Aliyev", "phone": "+998900000042"},
+            ]
+        )
+        passwords = [r["password"] for r in data["rows"]]
+        self.assertEqual(len(passwords), 2)
+        self.assertTrue(all(passwords))
+        self.assertNotEqual(passwords[0], passwords[1])
+        # Alifboda chalkash belgilar (0/1/O/I/l) yo'q — o'quvchi qog'ozdan
+        # o'qib xatosiz kirishi uchun
+        for p in passwords:
+            self.assertEqual(len(p), 8)
+            self.assertFalse(set(p) & set("0 1 O I l".split()))
+
+    def test_import_password_is_hashed_and_listed_for_the_bot(self):
+        """Bazada hash, botda esa ochiq ko'rsatiladi (`initial_password`)."""
+        _, data = self._import([{"name": "Ali", "phone": "+998900000041"}])
+        plain = data["rows"][0]["password"]
+
+        s = Student.objects.get()
+        self.assertEqual(s.initial_password, plain)
+        self.assertTrue(check_password(plain, s.password))
+        # Ism-familiya endi parol bo'lmaydi
+        self.assertFalse(check_password(f"{s.name} {s.surname}", s.password))
+        # Bot shu maydondan ko'rsatadi
+        self.assertIn(plain, telegram.student_login_info(s))
+
+    def test_web_login_accepts_the_import_password(self):
+        """Panelda o'quvchi natijada ko'rgan paroli bilan kira oladi."""
+        _, data = self._import([{"name": "Ali", "phone": "+998900000041"}])
+        plain = data["rows"][0]["password"]
+
+        login = views.login_student(
+            self.rf.post(
+                "/api/login/",
+                data=json.dumps({"phone": "+998900000041", "password": plain}),
+                content_type="application/json",
+            )
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertTrue(self.body(login)["exists"])
+
+    def test_changing_password_clears_the_initial_one(self):
+        """O'quvchi parolini o'zgartirgach bot "maxsus parol" rejimiga o'tadi."""
+        self._import([{"name": "Ali", "phone": "+998900000041"}])
+        s = Student.objects.get()
+        old_plain = s.initial_password
+
+        views.change_password(
+            self.rf.post(
+                "/api/change-password/",
+                data=json.dumps(
+                    {"phone": "+998900000041", "old_password": old_plain,
+                     "new_password": "YangiMaxfiy9"}
+                ),
+                content_type="application/json",
+            )
+        )
+        s.refresh_from_db()
+        self.assertEqual(s.initial_password, "")
+        self.assertTrue(check_password("YangiMaxfiy9", s.password))
+        info = telegram.student_login_info(s)
+        self.assertNotIn(old_plain, info)
+        self.assertIn("maxsus parol", info)
 
     # ── Excel yuklashda ustoz/guruhni o'zi ochish (auto_create) ──
 

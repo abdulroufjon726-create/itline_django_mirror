@@ -131,6 +131,10 @@ class Student(models.Model):
     )
     phone2 = models.CharField(max_length=50, blank=True, verbose_name="Qo'shimcha telefon")
     password = models.CharField(max_length=255, blank=True)
+    # Import paytida berilgan boshlang'ich parol (ochiq matnda, faqat botda
+    # ko'rsatish uchun). O'quvchi o'z parolini o'rnatganda tozalanadi —
+    # shunda eski parolni bot orqali qayta ko'rsatib bo'lmaydi.
+    initial_password = models.CharField(max_length=50, blank=True)
 
     teacher = models.ForeignKey(
         Teacher,
@@ -951,6 +955,10 @@ class Lead(models.Model):
         max_length=100, blank=True, verbose_name="Manba varaq"
     )
     source = models.CharField(max_length=30, blank=True, default="")
+    # Xavfsizlik: murojaat qayerdan kelgani (spam tahlili uchun)
+    ip_address = models.CharField(max_length=64, blank=True, default="")
+    geo_info = models.CharField(max_length=200, blank=True, default="", verbose_name="Joylashuv")
+    user_agent = models.CharField(max_length=300, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

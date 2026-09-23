@@ -3483,6 +3483,13 @@ def login_student(request):
             )
 
         candidates = _find_students_by_any_phone(phone)
+        # Ustozlar Teacher jadvalida (teachers/create orqali yaratilganlar).
+        # Probe bosqichida ularni ham ko'rsatish shart, aks holda
+        # frontend "Bu raqam tizimda topilmadi" deydi va parol maydoni
+        # ochilmaydi — ustoz tizimga kira olmaydi. Parol to'g'riligini
+        # baribir quyida tekshiramiz (probe faqat "bor/yo'q").
+        teacher = None if password is not None else _find_teacher_by_any_phone(phone)
+        exists = bool(candidates) or (teacher is not None)
 
         if password is None:
             # Parol bosqichidan OLDIN faqat "raqam bor/yo'q" so'raladi.
@@ -3494,7 +3501,7 @@ def login_student(request):
             )
             if limited:
                 return limited
-            return JsonResponse({"exists": bool(candidates)})
+            return JsonResponse({"exists": exists})
 
         # Brute-force himoyasi: shu IP+telefon 5 daqiqada 5 martadan
         # ortiq noto'g'ri parol kiritsa, vaqtincha bloklanadi

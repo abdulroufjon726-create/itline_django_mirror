@@ -926,6 +926,36 @@ class TeacherLoginChainTests(ApiCase):
         data = self.body(self._login("+998901234567", "excel2024"))
         self.assertTrue(data["used_default_password"])
 
+    def test_probe_finds_teacher_without_password(self):
+        """Birinchi qadam (parolsiz probe) ustoz raqamini HAM topishi shart.
+
+        Ilgari probe faqat Student jadvalga qarardi — teachers/create
+        orqali qo'shilgan ustoz "Bu raqam tizimda topilmadi" olardi va
+        parol maydoni ochilmasdi (demo'da aniqlandi).
+        """
+        self._create_teacher()
+        resp = views.login_student(
+            self.rf.post(
+                "/api/login/",
+                data=json.dumps({"phone": "+998901234567", "password": None}),
+                content_type="application/json",
+            )
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(self.body(resp)["exists"])
+
+    def test_probe_still_rejects_unknown_numbers(self):
+        self._create_teacher()
+        resp = views.login_student(
+            self.rf.post(
+                "/api/login/",
+                data=json.dumps({"phone": "+998900000777", "password": None}),
+                content_type="application/json",
+            )
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(self.body(resp)["exists"])
+
     def test_warning_goes_away_after_changing_password(self):
         self._create_teacher()
         resp = views.change_password(

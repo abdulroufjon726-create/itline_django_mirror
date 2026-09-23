@@ -203,10 +203,16 @@ def device_id(request):
 
 
 def client_ip(request):
-    forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()[:64]
-    return (request.META.get("REMOTE_ADDR") or "")[:64]
+    """Jurnal/qurilma yozuvlari uchun haqiqiy mijoz IP.
+
+    ratelimit._client_ip bilan bir xil mantiq: CF edge IP'larini
+    (soxta 'hosting' deb baholanadi) emas, CF-Connecting-IP'ni oladi.
+    Ilgari XFF'ning BIRINCHI yozuvi olinardi — hujumchi uni soxtalashti
+    olishi mumkin edi, jurnal noto'g'ri IP bilan to'ldirilardi.
+    """
+    from .ratelimit import _client_ip
+
+    return _client_ip(request)
 
 
 def is_device_blocked(request, phone):

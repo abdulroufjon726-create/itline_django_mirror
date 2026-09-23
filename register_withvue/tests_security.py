@@ -116,6 +116,76 @@ class VpnBlockMiddlewareTest(TestCase):
         self.assertEqual(mocked.call_count, 1)
 
 
+class CloudflareClientIpTest(TestCase):
+    """Render Cloudflare ortida: XFF'dagi oxirgi ommaviy yozuv ba'zan CF
+    edge IP bo'lib qoladi — u "hosting" deb baholanib TOZA mijozlarga
+    soxta 403 bergan. Endi CF-Connecting-IP ishlatiladi."""
+
+    def setUp(self):
+        _clear_caches()
+
+    def _with_geo(self, geo):
+        return patch("register_withvue.geo.geo_for_ip", return_value=geo)
+
+    def test_cf_edge_in_chain_uses_cf_connecting_ip(self):
+        # Real prod zanjiri: mijoz -> CF edge -> Render ichki (10.x)
+        client = Client(
+            HTTP_X_FORWARDED_FOR="144.124.196.104, 172.71.150.24, 10.238.26.158",
+            HTTP_CF_CONNECTING_IP="144.124.196.104",
+            REMOTE_ADDR="10.238.26.158",
+        )
+        with patch("register_withvue.geo.geo_for_ip", return_value=GEO_CLEAN) as mocked:
+            r = client.get("/api/captcha/new/")
+        self.assertEqual(r.status_code, 200)
+        # geo TOZA mijoz IP'si bilan so'ralgan (CF edge EMAS)
+        self.assertEqual(mocked.call_args[0][0], "144.124.196.104")
+
+    def test_cf_edge_vpn_client_still_blocked(self):
+        # CF orqali kelgan VPN foydalanuvchi baribir bloklanadi
+        client = Client(
+            HTTP_X_FORWARDED_FOR="45.134.20.100, 172.71.150.24, 10.238.26.158",
+            HTTP_CF_CONNECTING_IP="45.134.20.100",
+            REMOTE_ADDR="10.238.26.158",
+        )
+        with self._with_geo(GEO_VPN):
+            r = client.get("/api/captcha/new/")
+        self.assertEqual(r.status_code, 403)
+
+    def test_cf_spoofed_header_without_cf_edge_is_ignored(self):
+        # Hujumchi o'zi CF-Connecting-IP yubordi, lekin zanjirda CF edge
+        # yo'q — sarlavha e'tiborsiz, oxirgi ommaviy XFF yozuvi olinadi
+        client = Client(
+            HTTP_X_FORWARDED_FOR="144.124.196.104, 10.0.0.1",
+            HTTP_CF_CONNECTING_IP="8.8.8.8",
+            REMOTE_ADDR="10.0.0.1",
+        )
+        with patch("register_withvue.geo.geo_for_ip", return_value=GEO_CLEAN) as mocked:
+            client.get("/api/captcha/new/")
+        self.assertEqual(mocked.call_args[0][0], "144.124.196.104")
+
+    def test_cf_edge_without_header_falls_back_to_edge(self):
+        # CF sarlavhasi yo'q (mumkin bo'lgan proxy zanjiri) — eski xulq:
+        # edge IP qayadi (false positive mumkin, lekin himoya saqlanadi)
+        from register_withvue.ratelimit import _client_ip
+
+        client = Client(
+            HTTP_X_FORWARDED_FOR="144.124.196.104, 172.71.150.24, 10.238.26.158",
+            REMOTE_ADDR="10.238.26.158",
+        )
+        self.assertEqual(_client_ip(client.get("/api/captcha/new/").wsgi_request), "172.71.150.24")
+
+    def test_ipv6_cf_edge_recognized(self):
+        # Cloudflare IPv6 edge — ro'yxatga kiritilgan, mijoz IPv6'si olinadi
+        from register_withvue.ratelimit import _client_ip
+
+        client = Client(
+            HTTP_X_FORWARDED_FOR="2a02:2168:100::1, 2606:4700:3033::1, 10.0.0.1",
+            HTTP_CF_CONNECTING_IP="2a02:2168:100::1",
+            REMOTE_ADDR="10.0.0.1",
+        )
+        self.assertEqual(_client_ip(client.get("/api/captcha/new/").wsgi_request), "2a02:2168:100::1")
+
+
 class SafeErrorTest(TestCase):
     """Ichki istisno matni foydalanuvchiga sizilmaydi."""
 

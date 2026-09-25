@@ -13,6 +13,29 @@ from django.test import Client, TestCase
 from .models import Lead
 
 
+def solve_captcha(client):
+    """Haqiqiy captcha oladi va to'g'ri javobini qaytaradi (test uchun)."""
+    import re
+
+    res = client.get("/api/captcha/new/")
+    data = json.loads(res.content)
+    a, b = re.findall(r"\d+", data["question"])
+    # captcha moduli juda tez yuborilganini rad etadi — 2s kutmaslik
+    # uchun cache'dagi created ni biroz orqaga suramiz (captcha
+    # alohida "captcha" cache'ida turadi — settings.CACHES)
+    from django.core.cache import caches
+
+    _c = caches["captcha"]
+    key = f"captcha:{data['id']}"
+    entry = _c.get(key)
+    entry["created"] -= 10
+    _c.set(key, entry, timeout=600)
+    return {
+        "captcha_id": data["id"],
+        "captcha_answer": int(a) + int(b) if "+" in data["question"] else int(a) - int(b),
+    }
+
+
 class SiteLeadTests(TestCase):
     def setUp(self):
         super().setUp()
@@ -40,26 +63,7 @@ class SiteLeadTests(TestCase):
         )
 
     def _solve_captcha(self):
-        """Haqiqiy captcha oladi va to'g'ri javobini qaytaradi."""
-        import re
-
-        res = self.client.get("/api/captcha/new/")
-        data = json.loads(res.content)
-        a, b = re.findall(r"\d+", data["question"])
-        # captcha moduli juda tez yuborilganini rad etadi — 2s kutmaslik
-        # uchun cache'dagi created ni biroz orqaga suramiz (captcha
-        # alohida "captcha" cache'ida turadi — settings.CACHES)
-        from django.core.cache import caches
-
-        _c = caches["captcha"]
-        key = f"captcha:{data['id']}"
-        entry = _c.get(key)
-        entry["created"] -= 10
-        _c.set(key, entry, timeout=600)
-        return {
-            "captcha_id": data["id"],
-            "captcha_answer": int(a) + int(b) if "+" in data["question"] else int(a) - int(b),
-        }
+        return solve_captcha(self.client)
 
     @patch("register_withvue.telegram.notify_managers_lead")
     def test_creates_lead_and_notifies(self, notify):
@@ -154,3 +158,96 @@ class SiteLeadTests(TestCase):
         lead = Lead.objects.get()
         self.assertEqual(lead.ip_address, "127.0.0.1")  # test client IP
         # geo tashqi xizmat testda ishlamasligi mumkin — IP esa doim yoziladi
+
+
+class SiteLeadGpsTests(TestCase):
+    """Brauzer GPS koordinatalari bilan joylashuv aniqligi.
+
+    Landing navigator.geolocation ruxsat berganda aniq nuqta keladi;
+    backend teskari geokodlash (BigDataCloud -> Nominatim) bilan haqiqiy
+    shahar nomini oladi. ip-api Uztelecom IP'larini noto'g'ri Toshkentga
+    bog'lashi muammosi shu bilan yechiladi.
+    """
+
+    QOQON = {"city": "Qo'qon", "region": "Farg'ona viloyati", "country": "O'zbekiston"}
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+        self.client = Client()
+        self.url = "/api/site-lead/"
+        self.payload = {
+            "name": "Test GPS Mijoz",
+            "phone": "+998 90 555 55 55",
+            "source": "website",
+        }
+
+    def _post(self, **extra):
+        body = {**self.payload, **extra, **solve_captcha(self.client)}
+        return self.client.post(
+            self.url, data=json.dumps(body), content_type="application/json"
+        )
+
+    @patch("register_withvue.telegram.notify_managers_lead")
+    @patch("register_withvue.geo._reverse_geocode_bdc", return_value=QOQON)
+    def test_gps_lead_gets_real_city(self, bdc, notify):
+        """GPS koordinata -> haqiqiy shahar nomi (Qo'qon test nuqtasi)."""
+        res = self._post(gps_lat=40.5286, gps_lon=70.9425)
+        self.assertEqual(res.status_code, 201)
+        lead = Lead.objects.get()
+        self.assertIn("Qo'qon", lead.geo_info)
+        self.assertIn("GPS", lead.geo_info)
+        self.assertEqual(lead.geo_lat, 40.5286)
+        self.assertEqual(lead.geo_lon, 70.9425)
+
+    @patch("register_withvue.telegram.notify_managers_lead")
+    def test_gps_out_of_range_falls_back_to_ip(self, notify):
+        """Diapazondan tashqari GPS (999) rad etiladi — IP taxmini qoladi."""
+        res = self._post(gps_lat=999.0, gps_lon=70.9425)
+        self.assertEqual(res.status_code, 201)
+        lead = Lead.objects.get()
+        self.assertNotIn("GPS", lead.geo_info)  # 127.0.0.1 -> "Lokal tarmoq"
+        self.assertIsNone(lead.geo_lat)
+
+    @patch("register_withvue.telegram.notify_managers_lead")
+    def test_gps_non_numeric_falls_back_to_ip(self, notify):
+        """Son bo'lmagan GPS qiymati jim rad etiladi, xato qaytmaydi."""
+        res = self._post(gps_lat="abc", gps_lon=None)
+        self.assertEqual(res.status_code, 201)
+        lead = Lead.objects.get()
+        self.assertNotIn("GPS", lead.geo_info)
+        self.assertIsNone(lead.geo_lat)
+
+    @patch("register_withvue.telegram.notify_managers_lead")
+    @patch("register_withvue.geo._reverse_geocode_nominatim", return_value=QOQON)
+    @patch("register_withvue.geo._reverse_geocode_bdc", return_value=None)
+    def test_reverse_geocode_falls_back_to_nominatim(self, bdc, nom, notify):
+        """BigDataCloud javob bermasa Nominatim ishlaydi."""
+        res = self._post(gps_lat=40.5286, gps_lon=70.9425)
+        self.assertEqual(res.status_code, 201)
+        lead = Lead.objects.get()
+        self.assertIn("Qo'qon", lead.geo_info)
+        self.assertEqual(lead.geo_lat, 40.5286)
+
+    @patch("register_withvue.telegram.notify_managers_lead")
+    @patch("register_withvue.geo._reverse_geocode_nominatim", return_value=None)
+    @patch("register_withvue.geo._reverse_geocode_bdc", return_value=None)
+    def test_reverse_geocode_all_fail_keeps_exact_coords(self, bdc, nom, notify):
+        """Providerlar javob bermasa ham aniq koordinata saqlanadi."""
+        res = self._post(gps_lat=40.5286, gps_lon=70.9425)
+        self.assertEqual(res.status_code, 201)
+        lead = Lead.objects.get()
+        self.assertIn("40.5286", lead.geo_info)
+        self.assertIn("70.9425", lead.geo_info)
+        self.assertIn("GPS", lead.geo_info)
+        self.assertEqual(lead.geo_lat, 40.5286)
+
+    @patch("register_withvue.telegram.notify_managers_lead")
+    def test_no_gps_keeps_ip_geo_behavior(self, notify):
+        """GPS yuborilmasa eski IP-geo xulqi o'zgarilmagan."""
+        res = self._post()
+        self.assertEqual(res.status_code, 201)
+        lead = Lead.objects.get()
+        self.assertEqual(lead.ip_address, "127.0.0.1")
+        self.assertNotIn("GPS", lead.geo_info)
+        self.assertIsNone(lead.geo_lat)

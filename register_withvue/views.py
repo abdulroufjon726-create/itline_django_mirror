@@ -8786,7 +8786,16 @@ def site_lead(request):
     from .device import format_device
     from .geo import client_meta, format_geo
 
-    meta = client_meta(request)
+    # Brauzer GPS ruxsat bergan bo'lsa aniq koordinata keladi (landing
+    # navigator.geolocation) — IP taxminidan aniqroq joylashuv uchun.
+    try:
+        gps_lat = round(float(data.get("gps_lat")), 4)
+        gps_lon = round(float(data.get("gps_lon")), 4)
+    except (TypeError, ValueError):
+        gps_lat = gps_lon = None
+    gps = (gps_lat, gps_lon) if gps_lat is not None and gps_lon is not None else None
+
+    meta = client_meta(request, gps=gps)
 
     _geo = meta.get("geo") or {}
     lead = Lead.objects.create(

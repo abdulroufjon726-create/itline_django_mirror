@@ -161,6 +161,15 @@ def format_geo(geo):
     if not geo:
         return ""
     parts = [p for p in (geo.get("city"), geo.get("region"), geo.get("country")) if p]
+    if geo.get("gps"):
+        # Brauzer GPS'dan kelgani ko'rinib tursin (IP taxminidan farqli).
+        # "Lokal tarmoq" joylagichi bu yerda ma'nosiz — o'rniga aniq
+        # koordinata ko'rsatiladi.
+        parts = [p for p in parts if p != "Lokal tarmoq"]
+        line = ", ".join(parts)
+        if not line:
+            line = f"{geo.get('lat')}, {geo.get('lon')}"
+        return ("📍 GPS: " + line)[:200]
     line = ", ".join(parts)
     if geo.get("isp"):
         line += f" ({geo['isp']})"
@@ -195,16 +204,118 @@ def maps_urls(geo):
     return {}
 
 
-def client_meta(request):
+def client_meta(request, gps=None):
     """So'rovdan IP, qurilma va joylashuv ma'lumotlarini yig'adi.
 
     Lead yaratishda ishlatiladi: spam tahlili + menejerga to'liq kontekst.
+
+    gps — landing brauzerining aniq koordinatalari (lat, lon). Brauzer
+    GPS ruxsat berganda IP'ga bog'langan shahar o'rniga aniq nuqta va
+    uning haqiqiy shahar nomi ishlatiladi (ip-api Uztelecom IP'larini
+    ko'pincha noto'g'ri Toshkentga bog'laydi).
     """
     ip = _client_ip(request)
     user_agent = (request.META.get("HTTP_USER_AGENT") or "")[:300]
+    geo = geo_for_ip(ip)
+    gps = _valid_gps(gps[0], gps[1]) if gps else None
+    if gps:
+        place = reverse_geocode(gps[0], gps[1])
+        base = geo or {}
+        if place:
+            geo = {
+                **base,
+                "country": place.get("country") or base.get("country") or "",
+                "city": place.get("city") or "",
+                "region": place.get("region") or "",
+                "isp": base.get("isp") or "",
+                "lat": gps[0],
+                "lon": gps[1],
+                "gps": True,
+            }
+        else:
+            # Shahar nomi olinmadi — aniq koordinata baribir saqlansin
+            geo = {**base, "lat": gps[0], "lon": gps[1], "gps": True}
     return {
         "ip": ip,
         "user_agent": user_agent,
         "device": parse_device(user_agent),
-        "geo": geo_for_ip(ip),
+        "geo": geo,
     }
+
+
+# --- Teskari geokodlash: GPS koordinata -> odam o'qiydigan joy nomi ---
+# Bepul providerlar: BigDataCloud (asosiy, kalit talab qilmaydi) ->
+# Nominatim/OpenStreetMap (zaxira). Natija 24 soat cache'da.
+
+_REV_TTL = 60 * 60 * 24
+_REV_UA = {"User-Agent": "Excellence-CRM-Lead/1.0"}
+
+
+def _reverse_geocode_bdc(lat, lon):
+    """BigDataCloud reverse-geocode-client: shahar/viloyat (kalitsiz)."""
+    url = (
+        "https://api.bigdatacloud.net/data/reverse-geocode-client"
+        f"?latitude={lat}&longitude={lon}&localityLanguage=uz"
+    )
+    try:
+        req = urllib.request.Request(url, headers=_REV_UA)
+        with urllib.request.urlopen(req, timeout=_GEO_TIMEOUT) as resp:
+            d = json.loads(resp.read().decode("utf-8"))
+        city = str(d.get("city") or d.get("locality") or "")[:50]
+        region = str(d.get("principalSubdivision") or "")[:50]
+        country = str(d.get("countryName") or "")[:50]
+        if not (city or region or country):
+            return None
+        return {"city": city, "region": region, "country": country}
+    except Exception:  # noqa: BLE001 — tashqi xizmat muhim emas
+        logger.debug("BigDataCloud reverse failed (%s, %s)", lat, lon, exc_info=True)
+    return None
+
+
+def _reverse_geocode_nominatim(lat, lon):
+    """Nominatim (OpenStreetMap): zaxira provider — shahar/tuman nomi."""
+    url = (
+        "https://nominatim.openstreetmap.org/reverse"
+        f"?lat={lat}&lon={lon}&format=json&zoom=10&accept-language=uz"
+    )
+    try:
+        req = urllib.request.Request(url, headers=_REV_UA)
+        with urllib.request.urlopen(req, timeout=_GEO_TIMEOUT) as resp:
+            d = json.loads(resp.read().decode("utf-8"))
+        addr = d.get("address") or {}
+        city = str(addr.get("city") or addr.get("town") or addr.get("district") or "")[:50]
+        region = str(addr.get("state") or addr.get("region") or "")[:50]
+        country = str(addr.get("country") or "")[:50]
+        if not (city or region or country):
+            return None
+        return {"city": city, "region": region, "country": country}
+    except Exception:  # noqa: BLE001
+        logger.debug("Nominatim reverse failed (%s, %s)", lat, lon, exc_info=True)
+    return None
+
+
+def _valid_gps(lat, lon):
+    """GPS qiymatlarini tekshiradi: son va diapazonda — (lat, lon), aks holda None."""
+    try:
+        lat = round(float(lat), 4)
+        lon = round(float(lon), 4)
+    except (TypeError, ValueError):
+        return None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+    return (lat, lon)
+
+
+def reverse_geocode(lat, lon):
+    """Koordinatadan joy nomi (cache bilan). Yo'q bo'lsa None."""
+    gps = _valid_gps(lat, lon)
+    if gps is None:
+        return None
+    lat, lon = gps
+    key = f"{_GEO_CACHE_PREFIX}rev:{lat},{lon}"
+    hit = cache.get(key)
+    if hit is not None:
+        return hit or None
+    place = _reverse_geocode_bdc(lat, lon) or _reverse_geocode_nominatim(lat, lon)
+    cache.set(key, place or "", timeout=_GEO_TTL)
+    return place
